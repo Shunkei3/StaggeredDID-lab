@@ -1,0 +1,921 @@
+---
+title: "Two-way Mundlak (TWM), Extended TWFE regression"
+author: Shunkei Kakimoto
+format:
+  html:
+    theme: 
+      - cosmo 
+    highlight: zenburn
+    embed-resources: true
+    number-sections: true
+    number-depth: 3
+    code-fold: true
+    code-summary: "Show the code"
+    code-tools: true
+    toc: true
+    toc-depth: 3
+    toc-expand: 3
+embed-resources: true
+# crossref:
+#   fig-title: Fig     # (default is "Figure")
+#   tbl-title: Tbl     # (default is "Table")
+#   title-delim: "—"   # (default is ":")
+tbl-cap-location: top
+execute:
+  warning: false
+  message: false
+  echo: true
+  error: false
+  fig-align: "center"
+engine: knitr
+---
+
+::: {.callout-caution}
+## TO DO:
+
+:::
+
+
+```{r}
+#| label: load-packages
+#| include: false
+library(here)
+i_am("GitControlled/Code/TWM_learning.qmd")
+
+library(data.table)
+library(tidyverse)
+library(foreach)
+library(broom) # tidy()
+
+library(fixest)
+library(did)
+library(etwfe)
+library(fastDummies)
+library(ggokabeito)
+
+library(parallel)
+
+library(flextable)
+library(gt)
+
+theme_set(theme_minimal())
+scale_colour_discrete <- scale_colour_okabe_ito
+scale_fill_discrete <- scale_fill_okabe_ito
+
+standardize_term <- function(term) {
+  # term = "year_2005:d_5" 
+  parts <- unlist(strsplit(term, ":"))
+  if (length(parts) > 1) {
+    paste(sort(parts), collapse = ":")
+  } else {
+    term
+  }
+}
+```
+
+
++ **Theorem 3.1**: the Two-Way Fixed Effects (TWFE) estimator is algebraically identical to a Pooled Ordinary Least Squares (POLS) estimator that includes not only the covariates ($\mathbf{x_{it}}$) but also the unit-specific averages over time $\mathbf{\bar{x}_{i \cdot}}$) and cross-sectional averages for each time $\mathbf{\bar{x}_{\cdot t}}$.
+  + "*$\mathbf{\bar{x}_{i \cdot}}$ and $\mathbf{\bar{x}_{\cdot t}}$ effectively act as sufficient statistics in accounting for any unit-specific heterogeneity and time-specific heterogeneity that is correalted with $\mathbf{x_{it}}$. Rather than having to include (N_1) + (T-1) control variables, it suffices to include 2K control variables $(\mathbf{\bar{x}_{i \cdot}}, \mathbf{\bar{x}_{\cdot t}})$*"
+
+
++ **Corollary 3.3**: Including additional variables that change only across $i$ or only acorss $t$ will not change the estimates.
+
+
++ Extended TWFE: Allow more heterogeneity than the usual TWFE model
++ Two-way Mundlak Regression (TWM): Pooled OLS where time average and cross-sectional average of covariates are included additionally. 
+
+<br>
+
+::: {.callout-note}
+## Questions
++ Any efficiency gain from MTW (or extended TWFE) over CS?
+  + The paper says that "*In cases where a never treated group exists, Callaway and Sant’Anna (2021) separate the NT group from other potential controls and therefore does not use all of the information availabe in the identifying assumptions. ...*" (See page 54)
+:::
+
+
+# Proof by R: The Equivalence between TWFE and TWM
+
+Model:
+$$
+y_{it} = \beta_1 x_{1it} + \beta_2 x_{2it} + c_i + f_t + u_{it}
+$$
+
++ $c_i$ is correlated with $x_{1it}$.
++ Run POLS, TWFE, and TWM, and compare the results. (One time simulation)
+
+```{r}
+#| label: equi-twfe-twm
+#| code-fold: false
+n_i = 1000
+n_t = 10
+beta1 <- 2
+beta2 <- 3
+
+reg_dt <- 
+  CJ(
+    i = 1:n_i,
+    t = 1:n_t
+  ) %>%
+  .[, ind_fe := rnorm(1), by = i] %>%
+  .[, time_fe := rnorm(1), by = t] %>%
+  .[, x1 := 0.6 * rnorm(.N, sd = .5) + 0.4 * ind_fe + 0.2 * time_fe] %>%
+  .[, x2 := rnorm(.N)] %>%
+  .[, y :=  beta1 * x1 + beta2 * x2 + ind_fe + time_fe + rnorm(.N, sd = 3)] %>%
+  .[, `:=`(
+    bar_x1_i = mean(x1),
+    bar_x2_i = mean(x2)
+    ), by = i] %>%
+  .[, `:=`(
+    bar_x1_t = mean(x1),
+    bar_x2_t = mean(x2)
+  ), by = t]
+
+pols <- lm(y ~ x1 + x2, reg_dt)
+twfe <- feols(y ~ x1 + x2|i + t, reg_dt)
+twm <- lm(y ~ x1 + x2 + bar_x1_i + bar_x2_i + bar_x1_t + bar_x2_t, reg_dt)
+
+res_reg <- 
+  list(
+    data.table(tidy(pols))[, type := "POLS"],
+    data.table(tidy(twfe))[, type := "TWFE"],
+    data.table(tidy(twm))[, type := "TWM"]
+  ) %>%
+  lapply(., \(x) x[term %in% c("x1", "x2")])
+
+res_reg
+```
+
+
+## Simulation 1: Extended TWFE and CS
+The following code is adapted from [this vlog post](https://arelbundock.com/posts/extendedtwfe/index.html).
+
+```{r}
+#| label: sim-extwfe-cs
+#| code-fold: false
+
+# /*===========================================*/
+#'=  Data Generating Process =
+# /*===========================================*/
+simulation6 = function() {
+  dat = CJ(firm = 1:1000, year = 1980:2015)     [
+    , time_fe := rnorm(1, sd = .5), by = "year"][
+    , unit_fe := rnorm(1, sd = .5), by = "firm"][
+    , state := sample(1:50, 1), by = "firm"    ]
+
+  setkey(dat, state, firm, year)
+
+  treatment_groups = data.table(
+    state = c(1, 18, 35),
+    cohort = c(1989, 1998, 2007),
+    hat_gamma = c(.5, .3, .1))
+  
+  dat = treatment_groups[dat, roll = TRUE, on = "state"]
+
+  dat                                                [
+    , treat  := as.numeric(year >= cohort)          ][
+    , gamma  := rnorm(.N, mean = hat_gamma, sd = .2)][
+    , tau    := fifelse(treat == 1, gamma, 0)       ][
+    , cumtau := cumsum(tau), by = "firm"            ][
+    , error  := rnorm(.N, 0, .5)                    ][
+    , y := unit_fe + time_fe + cumtau + error       ][
+    , time_to_treat := year - cohort                ]
+  
+  return(dat)
+}
+
+dat = simulation6()
+
+
+dat_true_ATT <- 
+  dat[treat == 1] %>%
+  .[, .(att_gt = mean(cumtau)), by = .(year, cohort)]
+
+ggplot(dat_true_ATT) +
+  geom_line(
+    aes(x = factor(year), y = att_gt, group = cohort, linetype = factor(cohort))
+  ) +
+  labs(x = "Year", y = "True ATT")
+
+# /*===========================================*/
+#'=  Estimation =
+# /*===========================================*/
+
+#/*--------------------------------*/
+#' ## Extended TWFE
+#/*--------------------------------*/
+# the treatment indicator is interacted with both time-to-treatment dummies and cohort dummies:
+# dat_twfe <- 
+#   copy(dat) %>%
+#   .[, `:=`(
+#     cohort = relevel(as.factor(cohort), ref = "1989"),
+#     year = relevel(as.factor(year),  ref = "1980")
+#   )]
+
+etwfe1 = 
+  # feols(y ~ treat : factor(time_to_treat) : factor(cohort) | firm + year, data = dat) %>%
+  # same as 
+  feols(y ~ treat : factor(year) : factor(cohort) | firm + year, data = dat) %>%
+  tidy() %>%
+  data.table()
+
+res_etwfe1 =
+  etwfe1[, .(term = term, etwfe = estimate)] %>%
+  .[, cohort := as.numeric(gsub(".*cohort.", "", term))] %>%
+  .[, year := as.numeric(gsub(".*year\\).*?(\\d+):.*", "\\1", term))] %>%
+  .[, .(cohort, year, etwfe)]
+
+
+etwfe2 <- 
+  lm(y ~ factor(year) + factor(cohort) + factor(year):factor(cohort),
+    data = dat[1989 <= year]) %>%
+  tidy() %>%
+  data.table()
+
+# res_etwfe2 =
+#   etwfe2[, .(term = term, etwfe2 = estimate)] %>%
+#   .[, cohort := as.numeric(gsub(".*cohort.", "", term))] %>%
+#   .[, year := as.numeric(gsub(".*year.(\\d+).*", "\\1", term))] %>%
+#   .[cohort <= year] %>%
+#   .[, .(cohort, year, etwfe2)]
+
+
+# etwfe3 <- 
+#   etwfe(
+#     fml  = y ~ 1, # outcome ~ controls
+#     tvar = year,        # time variable
+#     gvar = cohort, # group variable
+#     data = dat,       # dataset
+#   ) %>%
+#   tidy() %>%
+#   data.table()
+
+# res_etwfe3 <- 
+#   etwfe3[, .(term = term, etwfe3 = estimate)] %>%
+#   .[, cohort := as.numeric(gsub(".*cohort::(\\d+):.*", "\\1", x))] %>%
+#   .[, year := as.numeric(gsub(".*year::(\\d+)", "\\1", term))] %>% 
+#   .[, .(cohort, year, etwfe3)]
+
+
+# res_etwfe <- 
+#   merge(
+#     res_etwfe1, res_etwfe2, by = c("cohort", "year"), all = TRUE
+#   )
+  # merge(., res_etwfe3, by = c("cohort", "year"), all = TRUE)
+
+
+#/*--------------------------------*/
+#' ## Callaway and Sant'Anna (2021)
+#/*--------------------------------*/
+csa = att_gt(
+    yname = "y",
+    gname = "cohort",
+    idname = "firm",
+    tname = "year",
+    control_group = "notyettreated",
+    data = dat)
+
+# Clean the results
+res_csa = with(csa, data.table(cohort = group, year = t, csa = att))
+
+
+#/*--------------------------------*/
+#' ## Merge the TWFE and CSA results
+#/*--------------------------------*/
+results = merge(res_etwfe1, res_csa, by = c("cohort", "year"))
+colnames(results) = c("Cohort", "Year", "TWFE w/ interactions", "CSA (2021)")
+results[, Cohort := factor(Cohort)]
+
+dat_plot = melt(results, id.vars = c("Cohort", "Year"))
+ggplot(dat_plot, aes(Year, value, color = variable, linetype = Cohort)) +
+  geom_line(linewidth = 1.4) +
+  theme_minimal() +
+  labs(x = "Year", y = "ATT", color = "Estimator", linetype = "Cohort")
+```
+
+
+
+
+
+# Wooldridge's Simulation 
+
++ N = 500, T = 6 (2001 - 2006)
+  + Staggered entry starts from q = 4. Therfore, there are three cohorts (2004, 2005, 2006) and never-treated group.
+  + I want to estimate ATT(g,t) for each combination of post treatment periods ($t$) and cohort ($g$)
+    + $ATT(2004, 2004), ATT(2004, 2005), ATT(2004, 2006)$
+    + $ATT(2005, 2005), ATT(2005, 2006)$
+    + $ATT(2006, 2006)$
++ One covariate. CT imposed conditional on $x$. 
+
++ Some important variables:
+  + `d`: cohort indicator ({0,4,5,6})
+    + `d_4`, `d_5`, `d_6` are the cohort dummies
+  + `w`: time varying treatment indicator
+    + `w := d_4 * (year_2004 + year_2005 + year_2006) + d_5 * (year_2005 + year_2006) + d_6 * year_2006`
+    + e.g., For 2004 cohort, `w=1` in 2004 ~ 2006, otherwise 0. 
+
+## One time simulation
+```{r}
+#| label: sim2
+
+n <- 500
+n_t <- 6
+B <- 1000
+
+gen_wooldridge_sim6 <- function(){
+  
+  dt <-
+    CJ(
+      id = 1:n,
+      year = 2001:c(2000 + n_t)
+    ) %>%
+    # Generate indicator variables for each year
+    fastDummies::dummy_cols(select_columns = "year") %>%
+    # Generate x0 using gamma(1,1), and compute mean by id
+    .[, x0 := rgamma(.N, shape = 1, rate = 1)] %>%
+    .[, x := mean(x0), by = id] %>%
+    # Generate c ~ N(0,2) and keep it fixed within id
+    .[, c := rnorm(1, mean = 0, sd = 2), by = id] %>%
+    # Add serially uncorrelated error term (note: we'll add serial correlation later)
+    .[, u := rnorm(.N, mean = 0, sd = 2)]
+
+  # /*===== Generate treatment assignment (correlated with x) =====*/
+  dt <- 
+    dt[, trt := as.integer(-0.5 + x / 3 + rnorm(.N, mean = 0, sd = 1) > 0)] %>%
+    # Count number of treated years per id
+    .[, trt_sum := sum(trt), by = id] %>%
+    # Define treatment cohort indicators
+    .[, d := fcase(
+      trt_sum <= 2, 0,
+      trt_sum == 3, 4,
+      trt_sum == 4, 5,
+      trt_sum >= 5, 6
+    )] %>%
+    .[, d:= factor(d, levels = c("0", "4", "5", "6"))] %>%
+    fastDummies::dummy_cols(select_columns = "d") %>% # cohort dummies
+    # for CS estimation 
+    .[, first_treat := fcase(
+      d_4 == 1, 2004,
+      d_5 == 1, 2005,
+      d_6 == 1, 2006,
+      default = 0
+    )] %>%
+    # Drop intermediate treatment variables
+    .[, c("trt", "trt_sum") := NULL]
+
+  # /*===== Generate potential outcomes with common trends imposed. =====*/
+  # * Also common effect across time.
+  dt[, yinf := 20 + 0.2 * year_2002 + 0.3 * year_2003 + 0.4 * year_2004 + 0.5 * year_2005 + 0.6 * year_2006 + x/2 + c - (year_2004 + year_2005 + year_2006) + u
+    ] %>%
+    # Create y4, y5, y6 based on yinf and apply modifications conditional on year
+    .[, c("y4", "y5", "y6") := yinf] %>%
+    .[year >= 2004, y4 := 4 + yinf + (x - 1)/3 + 0.2 * year_2005 + 0.6 * year_2006 + rnorm(.N, mean = 0, sd = 2)] %>%
+    .[year >= 2005, y5 := 3 + yinf + (x - 1)/4 + 0.6 * year_2006 + rnorm(.N, mean = 0, sd = 2)] %>%
+    .[year >= 2006, y6 := 2 + yinf + (x - 1)/5 + rnorm(.N, mean = 0, sd = 2)]
+
+  # /*===== Generate Observed Outcome =====*/
+  # Generate observed outcome based on treatment cohort
+  dt[, y := d_0 * yinf + d_4 * y4 + d_5 * y5 + d_6 * y6]
+
+  # Generate time-varying treatment indicator for staggered intervention (w = d * p)
+  dt[, w := d_4 * (year_2004 + year_2005 + year_2006) + d_5 * (year_2005 + year_2006) + d_6 * year_2006]
+
+  # /*===== Demean x by corhort =====*/
+  mean_x_d_4 <- dt[d_4 == 1, mean(x)]
+  dt[, x_dm4 := x - mean_x_d_4]
+  mean_x_d_5 <- dt[d_5 == 1, mean(x)]
+  dt[, x_dm5 := x - mean_x_d_5]
+  mean_x_d_6 <- dt[d_6 == 1, mean(x)]
+  dt[, x_dm6 := x - mean_x_d_6]
+
+  # for(d in c("4", "5", "6")) {
+  #   dt[, paste0("x_dm", d) := x - dt[get(paste0("d_", d)) == 1, mean(x)]]
+  # }
+
+  # /*===== True ATT(g,t) =====*/
+  true_att <- 
+    dt[first_treat > 0 & year >= first_treat,] %>%
+    .[,true_att := fcase(
+      d_4 == 1, y4 - yinf,
+      d_5 == 1, y5 - yinf,
+      d_6 == 1, y6 - yinf
+    )] %>%
+    .[first_treat > 0 & year >= first_treat, .(att_gt = mean(true_att, na.rm = TRUE)),
+    by = .(cohort = first_treat, year)
+    ]
+
+  return(list(dt = dt,  true_att = true_att))
+}
+
+
+set.seed(123)
+ls_dt <- gen_wooldridge_sim6()
+dt <- ls_dt$dt
+true_att <- ls_dt$true_att
+
+```
+
+## Without Controls
+Following models are equivalent:
+TWM model (1.1) - Full time period dummies
+$$
+y_{it} \text{ on } 1, d_{iq}, ..., d_{iT}, f2_t, ..., fT_t, d_{iq}\cdot fq_t, d_{iq}\cdot fT_t, ..., d_{iT} \cdot fT_t
+$$
+
+TWM model (1.2) - Time period dummies after the treatment (post-treatment time period dummies)
+$$
+y_{it} \text{ on } 1, d_{iq}, ..., d_{iT}, f2_t, ..., fT_t, d_{iq}\cdot fq_t, ..., d_{iq}\cdot fT_t, ..., d_{iT} \cdot fT_t
+$$
+
+ETWFE model (1.3)
+$$
+y_{it} \text{ on } 1, d_{iq}, ..., d_{iT}, f2_t, ..., fT_t, d_{iq}\cdot fq_t, d_{iq}\cdot fT_t, ..., d_{iT} \cdot fT_t
+$$
+
+Note that TWM model (1.1) can be written as the follwoing TWM model (1.2.1) which is shown in Equation (6.16) in the paper. 
+
+TWM model (1.2.1) 
+$$
+y_{it} \text{ on } 1, d_{iq}, ..., d_{iT}, f2_t, ..., fT_t, w_{it} \cdot d_{iq}\cdot fq_t, ..., w_{it} \cdot d_{iq}\cdot fT_t, ..., w_{it} \cdot d_{iT} \cdot fT_t
+$$
+
+Why $w_{it} \cdot d_{ir}\cdot fs_t =  d_{ir}\cdot fs_t$ for $s \ge r$, $r \in \{q, q+1, ..., T\}$? This is simple. $w_{it}$ indicates treatment status for individual $i$ at time period $t$. For example, $w_{ir}=1$ when individual $i$ is in post-treatment status after $t \ge r$. Meanwhile, $d_{ir}\cdot fs_t = 1$ only when individual $i$ is in treatment cohort $r$ and he is in post-treatment time period. Therefore, whenever $d_{ir}\cdot fs_t = 1$, $w_{it} = 1$ ($d_{ir}\cdot fs_t = 1$ and $w_[it]$ moves exactly in the same way). Thus, $w_{it} \cdot d_{ir}\cdot fs_t =  d_{ir}\cdot fs_t$ for $s \ge r$, $r \in \{q, q+1, ..., T\}$.
+
+Wooldridge show the Equation (6.16) to emphasize that the model can allow fir substantial effect heterogeneity beyond the approach taht includes only $w_{it}$ by itself and estimate a single treatment effect.
+
+```{r}
+# /*===========================================*/
+#'=  Without Controls =
+# /*===========================================*/
+# /*===== (1.1) POLS, TWM, Equation (6.17) in the paper  =====*/
+# Full year dummies
+run_reg_no_controls <- function(dt){
+twm1_1 <-
+  feols(y ~ 
+    d_4 + d_5 + d_6 + 
+    factor(year) + 
+    d_4:year_2004 + d_4:year_2005 + d_4:year_2006 + 
+    d_5:year_2005 + d_5:year_2006 + 
+    d_6:year_2006,
+    cluster = ~id, data = dt
+  ) %>% 
+  tidy() %>%
+  data.table() %>%
+  .[grepl("^d_[0-9]+:year_[0-9]+$", term)] %>%
+  .[, `:=`(
+    year = as.numeric(gsub(".*year_([0-9]+).*", "\\1", term)),
+    cohort = as.numeric(gsub(".*d_([0-9]+).*", "\\1", term)) + 2000
+  )] %>%
+  .[, .(cohort, year, estimate, std.error)] %>%
+  .[, `:=`(model = "pols1",controls = "no")]
+
+# /*===== (1.2) POLS, TWM, Equation (6.17)=====*/
+# "the time period dummies prior to q can be dropped without affecting the estimates"
+twm1_2 <- 
+  feols(
+    y ~ 
+    d_4 + d_5 + d_6 + 
+    year_2004 + year_2005 + year_2006 +
+    d_4:year_2004 + d_4:year_2005 + d_4:year_2006 + 
+    d_5:year_2005 + d_5:year_2006 + 
+    d_6:year_2006,
+    cluster = ~id, data = dt
+  ) %>%
+  tidy() %>%
+  data.table() %>%
+  .[grepl("^d_[0-9]+:year_[0-9]+$", term)] %>%
+  .[, `:=`(
+    year = as.numeric(gsub(".*year_([0-9]+).*", "\\1", term)),
+    cohort = as.numeric(gsub(".*d_([0-9]+).*", "\\1", term)) + 2000
+  )] %>%
+  .[, .(cohort, year, estimate, std.error)] %>%
+  .[, `:=`(model = "twm",controls = "no")]
+
+# This is equivalent to:
+# twm1_2_1 <- 
+#   feols(
+#     y ~ 
+#     d_4 + d_5 + d_6 + 
+#     year_2004 + year_2005 + year_2006 +
+#     w:d_4:year_2004 + w:d_4:year_2005 + w:d_4:year_2006 + 
+#     w:d_5:year_2005 + w:d_5:year_2006 + 
+#     w:d_6:year_2006,
+#     cluster = ~id, data = dt
+#   ) %>%
+#   tidy() %>%
+#   data.table() %>%
+#   .[grepl("^d_[0-9]+:year_[0-9]+:w$", term)] %>%
+#   .[, `:=`(
+#     year = as.numeric(gsub(".*year_([0-9]+).*", "\\1", term)),
+#     cohort = as.numeric(gsub(".*d_([0-9]+).*", "\\1", term)) + 2000
+#   )] %>%
+#   .[, .(cohort, year, estimate, std.error)] %>%
+#   .[, `:=`(model = "twm2",controls = "no")]
+
+
+
+# /*===== (1.3) TWFE =====*/
+# TWFE
+twfe1_3 <- 
+  feols(y ~ 
+    d_4:year_2004 + d_4:year_2005 + d_4:year_2006 + 
+    d_5:year_2005 + d_5:year_2006 + 
+    d_6:year_2006 | id + year, 
+    cluster = ~id, data = dt
+  ) %>%
+  tidy() %>%
+  data.table() %>%
+  .[, `:=`(
+    year = as.numeric(gsub(".*year_([0-9]+).*", "\\1", term)),
+    cohort = as.numeric(gsub(".*d_([0-9]+).*", "\\1", term)) + 2000
+  )] %>%
+  .[, .(cohort, year, estimate, std.error)] %>%
+  .[, `:=`(model = "etwfe",controls = "no")]
+
+# /*===== (1.4) CS-DID =====*/
+cs_1_4 <- 
+  att_gt(
+    yname = "y",
+    gname = "first_treat",
+    idname = "id",
+    tname = "year",
+    # control_group = "notyettreated",
+    control_group =c("nevertreated", "notyettreated"),
+    est_method = "dr",
+    clustervars = "id",
+    data = dt
+  ) %>%
+  tidy() %>%
+  data.table() %>%
+  .[, .(cohort = group, year = time, estimate, std.error)] %>%
+  .[cohort <= year,] %>%
+  .[, `:=`(model = "cs",controls = "no")]
+
+  reg_res1 <- rbindlist(list(twm1_2, twfe1_3, cs_1_4))
+
+  return(reg_res1)
+}
+
+reg_res1 <- run_reg_no_controls(dt)
+
+reg_res1
+```
+
+## With Controls
+
++ As a result of theorem 3.2, additing time-constant controls $x_i$, and also interacting them with the cohort dummies $d_{ir}$ does not change the treatment effect estimates. 
+> "However, having access to covariates allows us to relax the common trends assumption even in the staggered case."
+
+
+```{r}
+# /*===========================================*/
+#'=  With controls  =
+# /*===========================================*/
+# /*===== (2.1) POLS, TWM, Equation (6.25) in the paper =====*/
+run_reg_controls <- function(dt){
+twm2_1 <- 
+  feols(
+  y ~ 
+    d_4 + d_5 + d_6 +
+    x + 
+    d_4:x + d_5:x + d_6:x + 
+    year_2004 + year_2005 + year_2006 +
+    year_2004:x + year_2005:x + year_2006:x +
+    # w * d * f
+    d_4:year_2004 + d_4:year_2005 + d_4:year_2006 +
+    d_5:year_2005 + d_5:year_2006 +
+    d_6:year_2006 +
+    # w * d * f * demeaned_x
+    d_4:year_2004:x_dm4 + d_4:year_2005:x_dm4 + d_4:year_2006:x_dm4 +
+    d_5:year_2005:x_dm5 + d_5:year_2006:x_dm5 +
+    d_6:year_2006:x_dm6,
+  cluster = ~id,
+  data = dt
+  ) %>%
+  tidy() %>%
+  data.table() %>%
+  .[grepl("^d_[0-9]+:year_[0-9]+$", term)] %>%
+  .[, `:=`(
+    year = as.numeric(gsub(".*year_([0-9]+).*", "\\1", term)),
+    cohort = as.numeric(gsub(".*d_([0-9]+).*", "\\1", term)) + 2000
+  )] %>%
+  .[, .(cohort, year, estimate, std.error)] %>%
+  .[, `:=`(model = "twm",controls = "yes")]
+
+# , which is equivelent to 
+# twm2_1_1 <- 
+#   feols(
+#   y ~ 
+#     d_4 + d_5 + d_6 +
+#     x + 
+#     d_4:x + d_5:x + d_6:x + 
+#     year_2004 + year_2005 + year_2006 +
+#     year_2004:x + year_2005:x + year_2006:x +
+#     # w * d * f
+#     w:d_4:year_2004 + w:d_4:year_2005 + w:d_4:year_2006 +
+#     w:d_5:year_2005 + w:d_5:year_2006 +
+#     w:d_6:year_2006 +
+#     # w * d * f * demeaned_x
+#     w:d_4:year_2004:x_dm4 + w:d_4:year_2005:x_dm4 + w:d_4:year_2006:x_dm4 +
+#     w:d_5:year_2005:x_dm5 + w:d_5:year_2006:x_dm5 +
+#     w:d_6:year_2006:x_dm6,
+#   cluster = ~id,
+#   data = dt
+#   ) %>%
+#   tidy() %>%
+#   data.table() %>%
+#   .[grepl("^d_[0-9]+:year_[0-9]+:w$", term)] %>%
+#   .[, `:=`(
+#     year = as.numeric(gsub(".*year_([0-9]+).*", "\\1", term)),
+#     cohort = as.numeric(gsub(".*d_([0-9]+).*", "\\1", term)) + 2000
+#   )] %>%
+#   .[, .(cohort, year, estimate, std.error)] %>%
+#   .[, `:=`(model = "twm",controls = "yes")]
+
+# /*===== (2.2) ETWFE =====*/
+etwfe2_2 <- 
+  feols(
+    y ~ 
+    d_4:year_2004 +d_4:year_2005 +d_4:year_2006 +
+    d_5:year_2005 +d_5:year_2006 +
+    d_6:year_2006 +
+    d_4:year_2004:x_dm4 +d_4:year_2005:x_dm4 +d_4:year_2006:x_dm4 +
+    d_5:year_2005:x_dm5 +d_5:year_2006:x_dm5 +
+    d_6:year_2006:x_dm6  +
+    factor(year) + factor(year):x|id, 
+    cluster = ~id,
+    data = dt
+  ) %>%
+  tidy() %>%
+  data.table() %>%
+  .[, term := sapply(term, standardize_term)] %>%
+  .[grepl("^d_[0-9]+:year_[0-9]+$", term)] %>%
+  .[, `:=`(
+    year = as.numeric(gsub(".*year_([0-9]+).*", "\\1", term)),
+    cohort = as.numeric(gsub(".*d_([0-9]+).*", "\\1", term)) + 2000
+  )] %>%
+  .[, .(cohort, year, estimate, std.error)] %>%
+  .[, `:=`(model = "etwfe",controls = "yes")]
+
+
+# which is equivalent to 
+# etwfe2_2_1 <- 
+#   feols(
+#     y ~ 
+#     d_4:year_2004 +d_4:year_2005 +d_4:year_2006 +
+#     d_5:year_2005 +d_5:year_2006 +
+#     d_6:year_2006 +
+#     d_4:year_2004:x_dm4 +d_4:year_2005:x_dm4 +d_4:year_2006:x_dm4 +
+#     d_5:year_2005:x_dm5 +d_5:year_2006:x_dm5 +
+#     d_6:year_2006:x_dm6 + factor(year):x|id + year, 
+#     cluster = ~id,
+#     data = dt
+#   ) %>%
+#   tidy() %>%
+#   data.table() %>%
+#   .[, term := sapply(term, standardize_term)] %>%
+#   .[grepl("^d_[0-9]+:year_[0-9]+$", term)] %>%
+#   .[, `:=`(
+#     year = as.numeric(gsub(".*year_([0-9]+).*", "\\1", term)),
+#     cohort = as.numeric(gsub(".*d_([0-9]+).*", "\\1", term)) + 2000
+#   )] %>%
+#   .[, .(cohort, year, estimate, std.error)] %>%
+#   .[, `:=`(model = "etwfe",controls = "yes")]
+
+# test_etwfe <- 
+#   etwfe(
+#     fml  = y ~ x, # outcome ~ controls
+#     tvar = year,        # time variable
+#     gvar = first_treat, # group variable
+#     data = dt,       # dataset
+#     vcov = ~id  # vcov adjustment (here: clustered)
+#   ) %>%
+#   tidy() %>%
+#   data.table() %>%
+#   .[grepl("^\\.Dtreat:first_treat::[0-9]{4}:year::[0-9]{4}$", term)] %>%
+#   .[, `:=`(
+#     year = as.numeric(gsub(".*year::([0-9]+).*", "\\1", term)),
+#     cohort = as.numeric(gsub(".*first_treat::([0-9]+).*", "\\1", term))
+#   )] %>%
+#   .[, .(cohort, year, estimate, std.error)] %>%
+#   .[, `:=`(model = "etwfe",controls = "yes")]
+
+# /*===== (2.3) CS-DID =====*/
+cs_2_3 <- 
+  att_gt(
+    yname = "y",
+    gname = "first_treat",
+    idname = "id",
+    tname = "year",
+    xformla = ~ x,
+    control_group =c("nevertreated", "notyettreated"),
+    est_method = "dr",
+    clustervars = "id",
+    data = dt
+  ) %>%
+  tidy() %>%
+  data.table() %>%
+  .[, .(cohort = group, year = time, estimate, std.error)] %>%
+  .[cohort <= year,] %>%
+  .[, `:=`(model = "cs",controls = "yes")]
+
+reg_res2 <- rbindlist(list(twm2_1, etwfe2_2, cs_2_3))
+
+return(reg_res2)
+
+}
+
+reg_res2 <- run_reg_controls(dt)
+
+true_att
+
+reg_res2
+```
+
+## Monte Carlo Simulations
+```{r}
+#| label: sim-wooldridge-sim6
+#| output: false
+set.seed(1234)
+
+res_sim_sim6  <- 
+  mclapply(
+    1:1000,
+    \(i){
+      ls_dt <- gen_wooldridge_sim6()
+      dt <- ls_dt$dt
+      true_att <- ls_dt$true_att
+
+      reg_res_all <- 
+        rbind(
+          run_reg_no_controls(dt),
+          run_reg_controls(dt)
+        ) %>%
+        .[, sim := i]  
+      
+      return(list(
+        reg_res_all = reg_res_all,
+        true_att = true_att
+      ))
+    },
+    mc.cores = 10
+  )
+
+res_sim6_reg <- 
+  lapply(res_sim_sim6, \(x) x$reg_res_all) %>%
+  rbindlist() %>%
+  .[, .(
+    estimate = mean(estimate),
+    sd = sd(estimate)
+  ), by = .(cohort, year, model, controls)]
+
+res_sim6_true_att <- 
+  lapply(res_sim_sim6, \(x) x$true_att) %>%
+  rbindlist() %>%
+  .[, .(att_gt = mean(att_gt)), by = .(cohort, year)]
+
+res_sim6_reg_combined <- 
+  merge(res_sim6_reg, res_sim6_true_att, by = c("cohort", "year")) %>%
+  .[, c("att_gt", "estimate", "sd") := lapply(.SD, round, 2), .SDcols = c("att_gt", "estimate", "sd")]
+
+tb_res_sim6_no_controls <- 
+  res_sim6_reg_combined[controls == "no"] %>%
+  dcast(cohort + year + controls + att_gt~ model, value.var = c("estimate", "sd")) %>%
+  .[,.(cohort, year, controls, att_gt, estimate_twm, sd_twm, estimate_etwfe, sd_etwfe, estimate_cs, sd_cs)] %>%
+  .[, c("cohort", "year") := lapply(.SD, as.character), .SDcols = c("cohort", "year")]
+
+
+tb_res_sim6_controls <- 
+  res_sim6_reg_combined[controls == "yes"] %>%
+  dcast(cohort + year + controls + att_gt~ model, value.var = c("estimate", "sd")) %>%
+  .[,.(cohort, year, controls, att_gt, estimate_twm, sd_twm, estimate_etwfe, sd_etwfe, estimate_cs, sd_cs)] %>%
+  .[, c("cohort", "year") := lapply(.SD, as.character), .SDcols = c("cohort", "year")]
+```
+
+```{r}
+#| label: sim-wooldridge-sim6-no-controls
+flextable(tb_res_sim6_no_controls)
+```
+
+```{r}
+#| label: sim-wooldridge-sim6-with-controls
+flextable(tb_res_sim6_controls)
+```
+
+# Outdated
+## The Baker simulation
+```{r}
+#| eval: false
+set.seed(20200403)
+# /*===========================================*/
+#'=  Data Generating Process =
+# /*===========================================*/
+# /*===== Fixed Effects =====*/
+# unit fixed effects
+unit <- 
+  data.table(
+    unit = 1:1000, 
+    unit_fe = rnorm(1000, 0, 1),
+    # generate state
+    state = sample(1:40, 1000, replace = TRUE),
+    # generate treatment effect
+    mu = rnorm(1000, 0.3, 0.2)
+  )
+
+# year fixed effects 
+year <- 
+  data.table(
+    year = 1980:2010,
+    year_fe = rnorm(31, 0, 1)
+  )
+
+# /*===== Trend Break =====*/
+# Put the states into treatment groups
+treat_taus <- data.table(
+  # sample the states randomly
+  state = sample(1:40, 40, replace = FALSE),
+  # place the randomly sampled states into five treatment groups G_g
+  cohort = sort(rep(c(1982, 1991, 1998, 2004), 10))
+  )
+
+# make main dataset
+# full interaction of unit X year 
+dat <- 
+  CJ(unit = 1:1000, year = 1980:2010) %>% 
+  merge(., unit, by = "unit", all.x = TRUE) %>% 
+  merge(., year, by = "year", all.x = TRUE) %>% 
+  merge(., treat_taus, by = "state", all.x = TRUE)
+  # make error term and get treatment indicators and treatment effects
+  
+setkey(dat, state, unit, year)
+
+dat <- 
+  dat %>%
+  .[, error := rnorm(31000, 0, 0.5)] %>%
+  .[, treat := ifelse(year >= cohort, 1, 0)] %>%
+  .[, time_to_treat := year - cohort] %>%
+  .[, tau := ifelse(treat == 1, mu, 0)] %>% 
+  # calculate cumulative treatment effects
+  .[, cumtau := cumsum(tau), by = unit] %>%
+  # calculate the dep variable
+  .[, dep_var := unit_fe + year_fe + cumtau + error]
+
+
+dat_true_ATT <- 
+  dat[treat == 1] %>%
+  .[, .(att_gt = mean(cumtau)), by = .(year, cohort)] %>%
+  .[, time_to_treat := year - cohort]
+
+ggplot(dat_true_ATT) +
+  geom_line(
+    aes(x = factor(year), y = att_gt, group = cohort, linetype = factor(cohort))
+  ) +
+  labs(x = "Year", y = "True ATT")
+
+# /*===========================================*/
+#'=  Estimation =
+# /*===========================================*/
+#/*--------------------------------*/
+#' ## Extended TWFE
+#/*--------------------------------*/
+# mod <- feols(dep_var ~ treat : i(cohort, i.year) + i(year) | unit, data = dat)
+
+mod <- 
+  feols(dep_var ~ treat : factor(time_to_treat) : factor(cohort) |unit + year, data = dat) %>%
+  tidy(., conf.int = TRUE) %>%
+  data.table()
+
+cohorts <- c(as.character(sort(unique(dat$cohort))), NA)
+
+res_mod <- 
+  mod %>%
+  # ignore year dummies
+  # .[grepl("^w", term)] %>%
+  # cleanup
+  .[, cohort := as.numeric(gsub(".*cohort.", "", term))] %>%
+  .[, year := as.numeric(gsub(".*time_to_treat.(\\d+).*", "\\1", term)) + cohort]
+
+  # .[, `:=`(
+  #   cohort = as.numeric(sub(".*cohort::(\\d+).*", "\\1", term)),
+  #   year = as.numeric(sub(".*year::(\\d+).*", "\\1", term))
+  # )] %>%
+  # .[, time_to_treatment := year - cohort] %>%
+  # .[, cohort_next := as.numeric(cohorts[match(as.character(cohort), cohorts) + 1])] %>%
+  # .[year < cohort_next]
+
+ggplot(
+  res_mod, 
+  aes(x = year, y = estimate, ymin = conf.low, ymax = conf.high, color = factor(cohort))
+  ) +
+  # Baker simulation:
+  # tau is a random variable equal with mean 0.3
+  # cumsum(tau) = ATT
+  geom_abline(intercept = .3, slope = .3) +
+  geom_pointrange() +
+  labs(
+    x = "Year", 
+    y = "ATT",
+    color = "Cohort",
+    title = "Group-Time ATTs estimated using TWFE & Interactions.",
+    subtitle = "The black line shows the truth."
+  )
+```

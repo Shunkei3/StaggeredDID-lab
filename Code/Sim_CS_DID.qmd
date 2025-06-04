@@ -1,0 +1,731 @@
+---
+title: "Staggered DID in the presence of Heterogenous Treatment Effects by Cohorts"
+author: Shunkei Kakimoto
+format:
+  html:
+    page-layout: full
+    grid:
+      sidebar-width: 0px
+      body-width: 1000px
+      margin-width: 300px
+      gutter-width: 1.5rem
+    theme: cosmo
+    embed-resources: true
+    number-sections: true
+    number-depth: 3
+    code-fold: false
+    code-summary: "Show the code"
+    code-tools: true
+    toc: true
+    toc-depth: 3
+    toc-expand: 3
+    fontsize: 15pt
+bibliography: ../writing/1_StaggeredDID.bib
+tbl-cap-location: top
+execute:
+  warning: false
+  message: false
+  echo: true
+  error: false
+  fig-align: "center"
+engine: knitr
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+library(here)
+i_am("GitControlled/Code/Sim_CS_DID.qmd")
+```
+
+# Objective of This Report
+
+1. Summarize the paper by @Callaway.SantAnna2021.
+2. Implement the staggered DID method proposed by @Callaway.SantAnna2021 in various simulation settings.
+
+# Summary for @Callaway.SantAnna2021
+
+## Problem Addressed
+
+Standard two-way fixed effects (TWFE) regressions can give misleading estimates in Difference-in-Differences (DiD) settings with multiple periods and staggered treatment timing, especially when treatment effects are heterogeneous (when treatment effects evolve over time) [@Goodman-Bacon2021]
+
+
+## What They Did
+
+They proposes provide a unified framework for ATTs in DiD setups with multiple time peiriods and staggered treatment timing, and when the parallel trend assumption holds potentially only after conditioning on observed covariates (pre-treatment covariates).
+
+The main causal parameter of interest is ***group-time average treatment effect*** $ATT(g,t)$ (the average treatment effect for group $g$ at time $t$, where a group $g$ is defined by the time period when units are first treated.)
+
+## Identification Assumptions
+
+[**Assumption 1: Irreversibility of treatment**:]{style="color:blue"}
+      
+once a unit is treated, it cannot be converted back to untreated status.
+
+[**Assumption 2: Random sampling** ]{style="color:blue"}
+      
+each unit $i$ is randomly drawn from a large population of interest.
+
+::: {.callout-note collapse="false"}
+This assumption underlies their sampling-based inference approach, which is contrasted with the design-based inference approach proposed by @Athey.Imbens2022 for staggered DiD setups with fully randomized treatment adoption dates.
+:::
+
+[**Assumption 3:Limited treatment anticipation (or No anticipation)**]{style="color:blue"}
+
+Treated units do not start changing their outcomes in anticipation of treatment, at least not earlier than some specified number of periods ($\delta$) in advance.
+
+
+[**Assumption 4: Conditional Parallel Trends based on a "Never-Treated" Group**]{style="color:blue"}
+
+Conditional on covariates, the average outcome for the group first treated in period $g$ (group $g$) and for the "never-treated" group would have followed parallel paths in the absence of treatment.
+
+[**Assumption 5: Conditional Parallel Trends based on a "Not-yet Treated" Group**]{style="color:blue"}
+
+Conditional on covariates, the average outcome for the group $g$ and for the group of "not-yet-treated" by time $t$ would have followed parallel paths in the absence of treatment.
+
+::: {.callout-caution collapse="false"}
+## Assumption 4 or 5?
+The paper (see top part of page 204 in @Callaway.SantAnna2021) says 
+
+> "**It is important to stress that favoring Assumption 5 with respect to Assumption 4 involves potential drawbacks**. For instance, in the absence of treatment anticipation ($\delta = 0$), **Assumption 4 does not restrict observed pre-treatment trends across groups, whereas Assumption 5 does**. Not restricting pre-treatment trends may be particularly meaningful in applications where the economic environment during the "early-periods" was potentially different from the "later-periods". In these cases, the outcomes of different groups may evolve in a non-parallel manner during "early-periods", perhaps because the groups were exposed to different shocks, while trends become parallel in the "later-periods"."
+
+**What does this mean?**
+
+Assuming $\delta=0$,
+
++ Assumption 4 places no restrictions on pre-treatment periods for the treated group ($t \leq g$), meaning that it is okay to have different trends across groups before treatment starts as long as the conditional parallel trend assumption hold. (same as the standard parallel trend assumption in the TWFE model)
+  + ??? But, I'm not sure about this. If the pre-treatment trends are different, then it is not plausible to assume that the trends would be parallel after treatment starts.
+
++ Assumption 5 requires that those pre-treatment outcome trends be the same (conditional on covariates) across treated groups.
+
+
+Think about two groups $g$ (earlier treated group) and $g^{*}$ (later treated group). (i.e., $g < g^{*}$).
+
+The outcome trend during pre-treatment periods for group $g^{*}$ are used to infer counterfactual trend (change in the untreated potential outcome) for group $g$ in post-treatment periods.
+
+**However**, if group $g$ and group $g^{*}$ had different trends even before group $g$'s treatment starts, then it's unlikely that group $g$'s contractual trend after treatment would match group $g^{*}$'s observed trend.
+
+**In this sense, Assumption 5 puts restrictions on the pre-treatment trends for group $g^{*}$ (later treated group)**.
+
+
+:::: {.callout-tip collapse="false"}
+## Example: Irrigation Technology Adoption
+
+Counties adopt the technology in different years.
+
++ Farmers in Group A adopts in 2002
++ Farmers in Group B adopts in 2005
+
+We want to estimate the effect of the technology adoption on water use. To do this, we use Group A as the treated group and Group B as the not-yet-treated group.
+
+Suppose that 
+
++ Group A are in western Kansas, where groundwater depletion became severe by 2000.
++ Group B are in central Kansas, where aquifers were still relatively full during 2000 ~ 2004.
+
+So, 
+
++ Water use in Group A was already declining before 2002, due to worsening well yields.
++ Water use in Group B stayed flat until 2005.
+
+According to Assumption 5, it must be that Group B’s observed trend (since they’re untreated) must represent what Group A’s trend would have been if they hadn’t adopted in 2002.
+
+However, Group A would have shown declining water use even without treatment. Meanwhile, Group B shows no change. Thus, assumption 5 is violated. 
+
+Something like this....
+
+I cannot see the difference between Assumption 4 and 5.....
+
+::::
+
+:::
+
+::: {.callout-caution collapse="true"}
+## Conditional parallel trend assumption for LEPA adoption
+
+Think about which factors potentially affect the path of farmers' water use?
+
++ Soil characteristics (e.g., water holding capacity)
++ Fewer precipitation events with higher intensity
++ Higher temperature
++ Historical decrease in the depth to the water table
++ Historical decrease in the saturated thickness
+  + Does saturated thickness (and the rate of depletion) significantly vary across the state?
+:::
+
+
+[**Assumption 6: Overlap**]{style="color:blue"}
+
+
+## Main Theoretical Results
+
+They showed that, under the assumptions, one can recover the $ATT(g,t)$'s by exploiting different parts of the data generating process:
+
+i. **Outcome regression approach** (modeling the conditional expectation of the outcome evolution for the comparison groups)
+
+ii. **Inverse probability weighting approach** (modeling the conditional probability of being group $g$)
+
+iii. **Doubly robust apporach** (combination of the OR and IPW approaches)
+
+
+[OR, IPW, and DR appraoches are equivalent from the identification perspective.]{style="color:red"}
+
+They recommend the doubly robust (DR) approach
+
+> "DiD estimators based on the DR estimands usually enjoy additional robustness agains model-misspecifications when comoared to the OR and IPW estimands."
+
+
+
+### Estimation Process
+
+Two-step estimation procedure:
+
+1.  Estimate the nuisance functions (OR, IPW, DR) for each group $g$ and time period $t$. The goal is to construct the counterfactual outcome path for the treated group.
+    
+    + For example, if using IPW, we need to *correctly* estimate the conditional probability of unit $i$ being in group $g$ given their covariates $X$ and that they are either in group $g$ or in an appropriate comparison group.
+
+2. Then, plug the fitted values of these estimated nuisance functions into the sample analog of the considered $ATT(g,t)$ estimand to obtain estimate of the group-time average treatment effect.
+
+
+## Aggregation of ATT(g,t) estimates
+
+They also discuss different aggregation schemes for the $ATT(g,t)$ estimates: 
+
+[**(i) How do ATTs vary length of exposure to the treatment? (i.e, event study style analysis)**]{style="color:blue"}
+
+The goal is to understand the dynamics of the treatment effect with respect to the length of exposure to the treatment (i.e., event time).
+
+
+::: {.callout-caution collapse="false"}
+## Caution (Equation (3.5))
+If the composition of groups at each event time is different and/or compositions of groups at each length of exposure is different, then the ATT estimates at each event time are not comparable.
+
+&rarr; **"balancing"** the groups with respect to event time (i.e., to only aggregate the ATT(g,t)'s fpr a fixed set of groups that are exposed to the treatment for at least some particular time periods)
+:::
+
+<br>
+
+
+[**(ii) How ATTs vary across groups? (group-specific ATT)**]{style="color:blue"}
+
+The goal is to understand heterogeneity in the effect of participating in the treatment across groups.
+
+
+<br>
+
+
+[**(iii) Treatment effect heterogeneity with respect to calender time** (cumulative ATT)]{style="color:blue"}
+
+The goal is to understant the cumulative effect of participating in the treatment up to some particular time period.
+
+::: {.callout-tip}
+## For example
+The cumulative average effect of a given training program on earnings from the year that the first group of people were trained until year $t$.
+:::
+
+[**(iv) Overall ATT**]{style="color:blue"}
+
+One can get an overall effect of participating in the treatment by aggregating the ATT(g,t) estimates across all groups and time periods.
+
+
+# Simulation
+
+```{r}
+#| include: false
+#| label: load-packages
+
+# /*===========================================*/
+#'=  Setup =
+# /*===========================================*/
+library(here)
+library(data.table)
+library(foreach)
+library(dplyr)
+
+library(did)
+
+library(parallel)
+
+library(ggplot2)
+library(ggthemes)
+library(gridExtra)
+library(scico)
+library(viridis)
+library(ggpubfigs)
+
+
+theme_set(theme_bw())
+
+# library(ggokabeito)
+# scale_colour_discrete <- scale_colour_okabe_ito
+# scale_fill_discrete <- scale_fill_okabe_ito
+
+
+theme_simple <- 
+  theme_bw() +
+  theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(), 
+    legend.position = "none",
+    legend.title = element_blank()
+  )
+```
+
+
+## Simulation 1
+
+The object of this simulation is to check Callaway and Sant'Anna's staggered DID method in the presence of heterogenous treatment effects across cohorts.
+
+In this simulation, the number of corss-sectional units is 2000, and the number of time periods is 6 (2001 ~ 2006). There are 3 treatment groups (cohorts) that adopt the irrigation technology starting from 2004. There is a never-treated group. 
+
+The timing of the treatment adoption based on a time-invariant variable `x` (e.g., historical declining rate of water table). If `x` is high (i.e.,  the water table is declining rapidly), the the timing of the treatment adoption is earlier.
+
+Once generated the treatment assignment which is correlated with `x`, I generate the treatment effects. First, I will generate the base outcomes (i.e.,  `yinf`) for never-treated group. Then, I will generate the observed outcomes for treated group. This is basically the sum of the base outcome (`yinf`) and the treatment effects which vary by cohort. The earlier the cohort, the larger the treatment effect. However, the treatment effects are decreasing in absolute value as the cohort is getting older. For the last cohort, I want to generate the treatment effects that are close to zero on average.
+
+
+### Data Generating Process
+```{r}
+#| label: setup-sim1
+n <- 2000
+n_t <- 6
+
+gen_sim1 <- function(){
+  
+  # plot(density(rgamma(1000, shape = 1, rate = 1)))
+  # x <- rchisq(n, df = 2)
+  # plot(hist(x))
+  # summary(rchisq(n, df = 2))
+
+  sim1_dt <- 
+    # === First, create base cross-sectional data === #
+    data.table(
+      id = 1:n,
+      # Historical declining rate of water table (strictly positive)
+      x = rchisq(n, df = 2),
+      # Individual fixed effects
+      ind_fe = rnorm(n, mean = 0, sd = 5)
+    )  %>%
+    # Define cohorts based on x
+    .[, G := fcase(
+      x > quantile(x, 0.8), 2004,
+      x > quantile(x, 0.5), 2005,
+      x > quantile(x, 0.3), 2006,
+      default = 0  # Never treated
+    )] %>%
+    # === Expand the data to include all time periods === #
+    .[, .(
+      year = 2001:(2001 + n_t - 1)), by = .(id, x, ind_fe, G)
+    ] %>%
+    # Time fixed effects
+    .[, time_fe := rnorm(1, mean = 0, sd = 5), by = year] %>%
+    # Treatment indicators
+    .[, d := fifelse(year >= G & G != 0, 1, 0)] %>%
+    # Event time 
+    .[, e := year - G]
+
+  sim1_dt <- 
+    # Generate the base outcome variable
+    sim1_dt[, 
+      yinf := 50 + ind_fe + time_fe + 2*x + rnorm(.N, mean = 0, sd = 2)
+    ] %>%
+    # Generate the treatment effects
+    .[, te_u := rnorm(.N, mean = 0, sd = .5)] %>%
+    .[, te := fcase(
+      G == 2004 & e >=0, -8 /(1 + 0.5*e) + te_u,
+      G == 2005 & e >=0, -5/(1 + 0.3*e) + te_u,
+      G == 2006 & e >=0, -3 / (1 + e) + te_u,
+      default = 0
+    )] %>%
+    # Generate observed outcome variable
+    .[, y := yinf + te]
+  
+  #/*--------------------------------*/
+  #' ## Check: Trend of base outcomes, observed outcomes for treated groups
+  # plot_sim1_dt <- 
+  #   sim1_dt[,.(y = mean(y), yinf = mean(yinf)), by = .(year, G)]
+
+  # ggplot() +
+  #   # Plot the base outcomes for treated groups
+  #   geom_line(
+  #     data = plot_sim1_dt[G != 0],
+  #     aes(x = factor(year), y = yinf, color = "Base-outcomes for\ntreated group", group = G), linetype = "dashed"
+  #   ) +
+  #   # Plot the post-treatment outcomes for treated groups
+  #   geom_line(
+  #     data = plot_sim1_dt[G != 0 & year >= G],
+  #     aes(x = factor(year), y = y, color = "Post-treatment outcomes for\ntreated group", group = G)
+  #   ) +
+  #   geom_point(
+  #     data = plot_sim1_dt[G != 0 & year >= G],
+  #     aes(x = factor(year), y = y, color = "Post-treatment outcomes for\ntreated group")
+  #   ) +
+  #   # Plot the outcomes for never-treated group
+  #   geom_line(
+  #     data = plot_sim1_dt[G == 0][,G := NULL],
+  #     aes(x = factor(year), y = yinf, color = "Outcomes for Never-treated", group = "Never-treated outcomes")
+  #   ) +
+  #   facet_wrap(vars(G), ncol = 1)
+  #/*--------------------------------*/
+
+  true_att_gt <- 
+    sim1_dt %>%
+    .[, .(
+      value = mean(te),
+      conf.low = mean(te) + 1.96 * sd(te),
+      conf.high = mean(te) - 1.96 * sd(te)
+      ),by = .(G, year)
+    ] %>%
+    setnames(c("G", "year"), c("group", "time")) %>%
+    .[group != 0,] %>%
+    .[, pre_post := ifelse(time < group, "pre", "post")] %>%
+    .[, type := "true"]
+  
+  # ggplot(true_att_gt, aes(x = factor(time), y = true_att_gt, color = pre_post)) + 
+  #   geom_point() +
+  #   geom_pointrange(
+  #     aes(ymin = low_conf, ymax = high_conf),
+  #   ) +
+  #   geom_hline(aes(yintercept = 0), linetype = "dashed", color = "red") +
+  #   facet_wrap(~ group, ncol = 1)
+
+  return(list(dt = sim1_dt, true_att_gt = true_att_gt))
+}
+
+plot_att_gt <- function(true_att_gt){
+  ggplot(true_att_gt, aes(x = factor(time), y = value, color = pre_post)) + 
+    geom_point() +
+    geom_pointrange(
+      aes(ymin = conf.low, ymax = conf.high),
+    ) +
+    geom_hline(aes(yintercept = 0), linetype = "dashed", color = "black") +
+    facet_grid(group ~ type)
+}
+```
+
+
+```{r}
+#| label: gen-sim1-dt
+#/*--------------------------------*/
+#' ## Generate the data
+#/*--------------------------------*/
+ls_sim1_dt <- gen_sim1()
+
+sim1_dt <- ls_sim1_dt$dt
+sim1_true_att_gt <- ls_sim1_dt$true_att_gt#| 
+```
+
+### Check the trend of outcomes
+```{r}
+#| label: fig-sim1-trend-outcomes
+#| fig-cap: "Mean trend of outcomes for treated groups and never-treated group"
+#| fig-asp: .7
+#| out-width: 95%
+#| fig-width: 8.14
+
+#/*--------------------------------*/
+#' ## Trends of outcomes
+#/*--------------------------------*/
+plot_sim1_dt <- 
+  sim1_dt[,.(y = mean(y), yinf = mean(yinf)), by = .(year, G)]
+
+ggplot() +
+  # Plot the base outcomes for treated groups
+  geom_line(
+    data = plot_sim1_dt[G != 0],
+    aes(x = factor(year), y = yinf, color = "Base-outcomes for\ntreated group", group = G), linetype = "dashed"
+  ) +
+  # Plot the post-treatment outcomes for treated groups
+  geom_line(
+    data = plot_sim1_dt[G != 0 & year >= G],
+    aes(x = factor(year), y = y, color = "Post-treatment outcomes for\ntreated group", group = G)
+  ) +
+  geom_point(
+    data = plot_sim1_dt[G != 0 & year >= G],
+    aes(x = factor(year), y = y, color = "Post-treatment outcomes for\ntreated group")
+  ) +
+  # Plot the outcomes for never-treated group
+  geom_line(
+    data = plot_sim1_dt[G == 0][,G := NULL],
+    aes(x = factor(year), y = yinf, color = "Outcomes for Never-treated", group = "Never-treated outcomes")
+  ) +
+  facet_wrap(vars(G), ncol = 1)
+```
+
+### CS's DID without covariates
+```{r} 
+#| label: fig-sim1-naive
+#| fig-cap: "Simulation 1: Results"
+#| fig-asp: .7
+#| out-width: 95%
+#| fig-width: 8.14
+
+#/*--------------------------------*/
+#' ## Without covariate
+#/*--------------------------------*/
+sim1_did_out_naive <- 
+  att_gt(
+    yname = "y",
+    gname = "G", 
+    idname = "id",
+    tname = "year",
+    data = sim1_dt,
+    xformla = ~1,
+    control_group = "nevertreated", 
+    est_method = "dr"
+    # est_method = "reg"
+  )
+
+sim1_did_out_naive_dt <- 
+  tidy(sim1_did_out_naive) %>%
+  data.table() %>%
+  setnames("estimate", "value") %>%
+  .[, type := "estimate"] %>%
+  .[, pre_post := ifelse(time < group, "pre", "post")] %>%
+  .[, names(sim1_true_att_gt), with = FALSE] %>%
+  rbind(., sim1_true_att_gt)
+
+plot_att_gt(sim1_did_out_naive_dt)
+```
+
+
+## Simulation 2
+
++ In Simulation 1, I forced the parallel trend assumption to hold by construction.
++ I want to create the case where CS's DID (with never-treated group) causes bias in the estimation of ATT(g,t) if we do not control for covariates.
+
++ The important assumption is the conditional parallel trend assumption, meaning that the average outcome for the group first treated in period $g$ (group $g$) and for the "never-treated" group would have followed parallel paths in the absence of treatment, conditional on covariates.
+  + For example, the assumption means that "After controlling for (i.e., holding constant) the depth to the water table, the remaining difference in water use trends between group 2006 and the never-treated group would have been the same in the absence of treatment."
+
++ Consider the trend of water use, which is a function of the depth to the water table.
+
++ The raw trend of water use can differ. For example, treated group has been facing declining depth to the water table, which causes the water use to be declining. However, the never-treated group has been facing constant depth to the water table, which causes the water use to be almost constant.
+
++ Even though the raw trend of water use is different, after removing the effect of depth to the water table, the remaining difference in water use trends between treated group and never-treated group would be the same in the absence of treatment, in this case. å
+
++ So, let's check it
+  + I need to introduce the different base trends of water use between treated groups and never-treated group.
+  + The base trends of water use are also different across cohorts.
+
+### Data Generating Process
+```{r}
+#| label: setup-sim2
+gen_sim2 <- function(){
+
+ sim2_dt <- 
+    # === First, create base cross-sectional data === #
+    data.table(
+      id = 1:n,
+      # Historical declining rate of water table (strictly positive)
+      x = rchisq(n, df = 2),
+      # Individual fixed effects
+      ind_fe = rnorm(n, mean = 0, sd = 5)
+    )  %>%
+    # Define cohorts based on x
+    .[, G := fcase(
+      x > quantile(x, 0.8), 2004,
+      x > quantile(x, 0.5), 2005,
+      x > quantile(x, 0.3), 2006,
+      default = 0  # Never treated
+    )] %>%
+    # === Expand the data to include all time periods === #
+    .[, .(
+      year = 2001:(2001 + n_t - 1)), by = .(id, x, ind_fe, G)
+    ] %>%
+    .[, year_index := as.numeric(factor(year))] %>%
+    # Time fixed effects
+    .[, time_fe := rnorm(1, mean = 0, sd = 5), by = year] %>%
+    # Treatment indicators
+    .[, d := fifelse(year >= G & G != 0, 1, 0)] %>%
+    # Event time 
+    .[, e := year - G]
+  
+  # sim2_dt[, .N, by = .(G, d)]
+
+  # Generate the base outcome variable for never-treated group
+  sim2_dt[, 
+    yinf_base := 50 + ind_fe + time_fe + rnorm(.N, mean = 0, sd = 5)
+  ] %>%
+  .[, x_t := x * year_index] %>%
+  .[, yinf := fcase(
+    G == 0, yinf_base,
+    G == 2004, yinf_base - x_t,
+    G == 2005, yinf_base - x_t,
+    G == 2006, yinf_base - x_t
+  )] %>%
+  # Generate the treatment effects
+  .[, te_u := rnorm(.N, mean = 0, sd = .5)] %>%
+  .[, te := fcase(
+    G == 2004 & e >=0, -8 /(1 + 0.5*e) + te_u,
+    G == 2005 & e >=0, -5/(1 + 0.5*e) + te_u,
+    G == 2006 & e >=0, -3 / (1 + e) + te_u,
+    default = 0
+  )] %>%
+  # Generate observed outcome variable
+  .[, y := yinf + te]
+
+
+  #/*--------------------------------*/
+  #' ## Check: Trend of base outcomes, observed outcomes for treated groups
+  # plot_sim2_dt <- 
+  #   sim2_dt[,.(y = mean(y), yinf = mean(yinf)), by = .(year, G)]
+
+  # ggplot() +
+  #   # Plot the base outcomes for treated groups
+  #   geom_line(
+  #     data = plot_sim2_dt[G != 0],
+  #     aes(x = factor(year), y = yinf, color = "Base-outcomes for\ntreated group", group = G), linetype = "dashed"
+  #   ) +
+  #   # Plot the post-treatment outcomes for treated groups
+  #   geom_line(
+  #     data = plot_sim2_dt[G != 0 & year >= G],
+  #     aes(x = factor(year), y = y, color = "Post-treatment outcomes for\ntreated group", group = G)
+  #   ) +
+  #   geom_point(
+  #     data = plot_sim2_dt[G != 0 & year >= G],
+  #     aes(x = factor(year), y = y, color = "Post-treatment outcomes for\ntreated group")
+  #   ) +
+  #   # Plot the outcomes for never-treated group
+  #   geom_line(
+  #     data = plot_sim2_dt[G == 0][,G := NULL],
+  #     aes(x = factor(year), y = yinf, color = "Outcomes for Never-treated", group = "Never-treated outcomes")
+  #   ) +
+  #   facet_wrap(vars(G), ncol = 1)
+  #/*--------------------------------*/
+
+true_att_gt2 <- 
+  sim2_dt %>%
+  .[, .(
+    value = mean(te),
+    conf.low = mean(te) + 1.96 * sd(te),
+    conf.high = mean(te) - 1.96 * sd(te)
+    ),by = .(G, year)
+  ] %>%
+  setnames(c("G", "year"), c("group", "time")) %>%
+  .[!group == 0,] %>%
+  .[, pre_post := ifelse(time < group, "pre", "post")] %>%
+  .[, type := "true"]
+
+  return(list(dt = sim2_dt, true_att_gt = true_att_gt2))
+}
+```
+
+```{r}
+#| label: gen-sim2-dt
+#/*--------------------------------*/
+#' ## Generate the data
+#/*--------------------------------*/
+ls_sim2_dt <- gen_sim2() 
+
+sim2_dt <- ls_sim2_dt$dt
+sim2_true_att_gt <- ls_sim2_dt$true_att_gt
+```
+
+### Check the trend of outcomes
+```{r}
+#| label: fig-sim2-trend-outcomes
+#| fig-cap: "Mean trend of outcomes for treated groups and never-treated group"
+#| fig-asp: .7
+#| out-width: 95%
+#| fig-width: 8.14
+
+#/*--------------------------------*/
+#' ## Trend of outcomes
+#/*--------------------------------*/
+plot_sim2_dt <- 
+  sim2_dt[,.(y = mean(y), yinf = mean(yinf)), by = .(year, G)]
+
+ggplot() +
+  # Plot the base outcomes for treated groups
+  geom_line(
+    data = plot_sim2_dt[G != 0],
+    aes(x = factor(year), y = yinf, color = "Base-outcomes for\ntreated group", group = G), linetype = "dashed"
+  ) +
+  # Plot the post-treatment outcomes for treated groups
+  geom_line(
+    data = plot_sim2_dt[G != 0 & year >= G],
+    aes(x = factor(year), y = y, color = "Post-treatment outcomes for\ntreated group", group = G)
+  ) +
+  geom_point(
+    data = plot_sim2_dt[G != 0 & year >= G],
+    aes(x = factor(year), y = y, color = "Post-treatment outcomes for\ntreated group")
+  ) +
+  # Plot the outcomes for never-treated group
+  geom_line(
+    data = plot_sim2_dt[G == 0][,G := NULL],
+    aes(x = factor(year), y = yinf, color = "Outcomes for Never-treated", group = "Never-treated outcomes")
+  ) +
+  facet_wrap(vars(G), ncol = 1)
+
+```
+
+### CS's DID without covariates
+```{r}
+#| label: fig-sim2-result-naive
+#| fig-cap: "Simulation 2: Results (Without any covariate)"
+#| fig-asp: .7
+#| out-width: 95%
+#| fig-width: 8.142857
+
+#/*--------------------------------*/
+#' ## Without covariate
+#/*--------------------------------*/
+sim2_did_out_naive <- 
+  att_gt(
+    yname = "y",
+    gname = "G", 
+    idname = "id",
+    tname = "year",
+    data = sim2_dt,
+    xformla = ~ 1,
+    control_group = "nevertreated", 
+    est_method = "dr"
+  )
+
+sim2_did_out_naive_dt <- 
+  tidy(sim2_did_out_naive) %>%
+  data.table() %>%
+  setnames("estimate", "value") %>%
+  .[, type := "estimate"] %>%
+  .[, pre_post := ifelse(time < group, "pre", "post")] %>%
+  .[, names(sim2_true_att_gt), with = FALSE] %>%
+  rbind(., sim2_true_att_gt)
+
+plot_att_gt(sim2_did_out_naive_dt)
+```
+
+### CS's DID with covariates
+```{r}
+#| label: fig-sim2-result-covariate
+#| fig-cap: "Simulation 2: Results (With covariates)"
+#| fig-asp: .7
+#| out-width: 95%
+#| fig-width: 8.14
+
+#/*--------------------------------*/
+#' ## With Covariate
+#/*--------------------------------*/
+sim2_did_out <-
+  att_gt(
+    yname = "y",
+    gname = "G", 
+    idname = "id",
+    tname = "year",
+    data = sim2_dt,
+    xformla = ~ x_t,
+    control_group = "nevertreated", 
+    # est_method = "dr"
+    est_method = "reg"
+  )
+
+sim2_did_out_dt <- 
+  tidy(sim2_did_out) %>%
+  data.table() %>%
+  setnames("estimate", "value") %>%
+  .[, type := "estimate"] %>%
+  .[, pre_post := ifelse(time < group, "pre", "post")] %>%
+  .[, names(sim2_true_att_gt), with = FALSE] %>%
+  rbind(., sim2_true_att_gt)
+
+plot_att_gt(sim2_did_out_dt)
+```
