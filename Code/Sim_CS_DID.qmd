@@ -254,6 +254,8 @@ library(scico)
 library(viridis)
 library(ggpubfigs)
 
+library(etwfe)
+
 
 theme_set(theme_bw())
 
@@ -270,6 +272,8 @@ theme_simple <-
     legend.position = "none",
     legend.title = element_blank()
   )
+
+
 ```
 
 
@@ -287,9 +291,10 @@ Once generated the treatment assignment which is correlated with `x`, I generate
 ### Data Generating Process
 ```{r}
 #| label: setup-sim1
+
+# /*===== Parameters =====*/
 n <- 2000
 n_t <- 6
-
 gen_sim1 <- function(){
   
   # plot(density(rgamma(1000, shape = 1, rate = 1)))
@@ -492,7 +497,7 @@ plot_att_gt(sim1_did_out_naive_dt)
 ## Simulation 2
 
 + In Simulation 1, I forced the parallel trend assumption to hold by construction.
-+ I want to create the case where CS's DID (with never-treated group) causes bias in the estimation of ATT(g,t) if we do not control for covariates.
++ [**I want to create the case where CS's DID (with never-treated group) causes bias in the estimation of ATT(g,t) if we do not control for covariates.**]{style="color:blue"}
 
 + The important assumption is the conditional parallel trend assumption, meaning that the average outcome for the group first treated in period $g$ (group $g$) and for the "never-treated" group would have followed parallel paths in the absence of treatment, conditional on covariates.
   + For example, the assumption means that "After controlling for (i.e., holding constant) the depth to the water table, the remaining difference in water use trends between group 2006 and the never-treated group would have been the same in the absence of treatment."
@@ -639,7 +644,7 @@ ggplot() +
   # Plot the base outcomes for treated groups
   geom_line(
     data = plot_sim2_dt[G != 0],
-    aes(x = factor(year), y = yinf, color = "Base-outcomes for\ntreated group", group = G), linetype = "dashed"
+    aes(x = factor(year), y = yinf, color = "Base-outcomes for\ntreated groups", group = G), linetype = "dashed"
   ) +
   # Plot the post-treatment outcomes for treated groups
   geom_line(
@@ -648,7 +653,7 @@ ggplot() +
   ) +
   geom_point(
     data = plot_sim2_dt[G != 0 & year >= G],
-    aes(x = factor(year), y = y, color = "Post-treatment outcomes for\ntreated group")
+    aes(x = factor(year), y = y, color = "Post-treatment outcomes for\ntreated groups")
   ) +
   # Plot the outcomes for never-treated group
   geom_line(
@@ -658,6 +663,12 @@ ggplot() +
   facet_wrap(vars(G), ncol = 1)
 
 ```
+
+
+::: {.callout-note}
++ Base-outcomes for treated groups means that the outcomes for treated groups in the absence of treatment.
+:::
+
 
 ### CS's DID without covariates
 ```{r}
@@ -670,7 +681,7 @@ ggplot() +
 #/*--------------------------------*/
 #' ## Without covariate
 #/*--------------------------------*/
-sim2_did_out_naive <- 
+sim2_cs_did_out_naive <- 
   att_gt(
     yname = "y",
     gname = "G", 
@@ -682,16 +693,61 @@ sim2_did_out_naive <-
     est_method = "dr"
   )
 
-sim2_did_out_naive_dt <- 
-  tidy(sim2_did_out_naive) %>%
+sim2_cs_did_out_naive_dt <- 
+  tidy(sim2_cs_did_out_naive) %>%
   data.table() %>%
   setnames("estimate", "value") %>%
   .[, type := "estimate"] %>%
   .[, pre_post := ifelse(time < group, "pre", "post")] %>%
   .[, names(sim2_true_att_gt), with = FALSE] %>%
-  rbind(., sim2_true_att_gt)
+  .[, `:=`(model = "cs_did", controls = "no")]
 
-plot_att_gt(sim2_did_out_naive_dt)
+sim2_etwfe_out_naive <- 
+  etwfe(
+    fml = y ~ 1,    # outcome ~ controls
+    tvar = year,    # time variable
+    gvar = G,       # group variable
+    data = sim2_dt, # dataset
+    # vcov = ~id    # vcov adjustment (here: clustered)
+  ) %>%
+  tidy() %>%
+  data.table() %>%
+  .[grepl("^\\.Dtreat:G::[0-9]{4}:year::[0-9]{4}$", term)] %>%
+  .[, `:=`(
+    time = as.numeric(gsub(".*year::([0-9]+).*", "\\1", term)),
+    group = as.numeric(gsub(".*G::([0-9]+).*", "\\1", term))
+  )] %>%
+  .[, .(group, time, estimate, std.error)] %>%
+  .[, `:=`(
+    value = estimate,
+    conf.low = estimate - 1.96 * std.error,
+    conf.high = estimate + 1.96 * std.error,
+    pre_post = ifelse(time < group, "pre", "post"),
+    model = "etwfe",
+    type = "estimate",
+    controls = "no"
+  )] %>%
+  .[, names(sim2_cs_did_out_naive_dt), with = FALSE]
+
+names(sim2_cs_did_out_naive_dt)
+names(sim2_etwfe_out_naive)
+
+sim2_out_naive_dt <- 
+  rbind(
+    sim2_cs_did_out_naive_dt, 
+    sim2_etwfe_out_naive, 
+    sim2_true_att_gt,
+    fill = TRUE
+  )
+
+ggplot(sim2_out_naive_dt, aes(x = factor(time), y = value, color = pre_post)) + 
+    geom_point() +
+    geom_pointrange(
+      aes(ymin = conf.low, ymax = conf.high),
+    ) +
+    geom_hline(aes(yintercept = 0), linetype = "dashed", color = "black") +
+    facet_grid(group ~ type)
+
 ```
 
 ### CS's DID with covariates
