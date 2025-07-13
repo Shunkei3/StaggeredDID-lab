@@ -5,3 +5,8 @@
 .DS_Store
 README.html
 README_files
+/.quarto/
+*_files
+
+_freeze
+*.html
