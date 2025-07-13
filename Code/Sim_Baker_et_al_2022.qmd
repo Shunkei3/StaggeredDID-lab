@@ -36,7 +36,7 @@ engine: knitr
 #| label: load-packages
 #| include: false
 library(here)
-i_am("GitControlled/Code/Sim_Baker_et_al_2001.qmd")
+i_am("GitControlled/Code/Sim_Baker_et_al_2022.qmd")
 
 library(data.table)
 library(foreach)
