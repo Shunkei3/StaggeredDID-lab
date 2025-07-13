@@ -1,0 +1,797 @@
+---
+title: "Baker et al. (2022)'s Simulation"
+author: shunkei kakimoto
+format:
+  html:
+    page-layout: full
+    grid:
+      sidebar-width: 0px
+      body-width: 1000px
+      margin-width: 300px
+      gutter-width: 1.5rem
+    theme: cosmo
+    freeze: true
+    embed-resources: true
+    number-sections: true
+    number-depth: 3
+    code-fold: false
+    code-summary: "show the code"
+    code-tools: true
+    toc: true
+    toc-depth: 3
+    toc-expand: 3
+    fontsize: 15pt
+bibliography: ../writing/1_staggereddid.bib
+tbl-cap-location: top
+execute:
+  warning: false
+  message: false
+  echo: true
+  error: false
+  fig-align: "center"
+engine: knitr
+---
+
+```{r}
+#| label: load-packages
+#| include: false
+library(here)
+i_am("GitControlled/Code/Sim_Baker_et_al_2001.qmd")
+
+library(data.table)
+library(foreach)
+library(dplyr)
+library(tidyr)
+
+library(broom) # tidy()
+library(fixest)
+library(did)
+library(etwfe)
+library(fastDummies)
+
+library(flextable)
+library(gt)
+
+# === Parallel computation === #
+library(future.apply)
+plan(multicore, workers = availableCores() - 5)
+library(progressr)
+
+# === Figures === #
+library(ggplot2)
+library(ggokabeito)
+library(patchwork)
+
+theme_set(theme_bw())
+
+# out2fig = function(out.width, out.width.default = 0.7, fig.width.default = 6) {
+#     fig.width.default * out.width / out.width.default 
+# }
+# out2fig(0.95)
+
+fig_theme <- 
+   theme(
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    legend.box = "horizontal"
+  )
+```
+
+
+# @Baker.etal2022's Simulations 
++ 1000 firms in 50 states
++ 46-year period from 1980 to 2015
++ $\delta$: treatment effect
+
+<br>
+
+Their simulations are grouped with three aspects:
+
++ (I) Treatment timing: Common treatment timing or Staggered interventions
++ (II) Treatment effect heterogeneity: 
+  + (II)-(i) **Temporal heterogeneity**: constant or dynamic treatment effects over time
+  + (II)-(ii) **Cohort heterogeneity**: equal or unequal treatment effects across cohorts
+
+<br>
+
+Here we summarize the six simulations they conducted in their paper:
+
+| Simulation | Treatment Timing | Temporal Heterogeneity | Cohort Heterogeneity |
+|------------|------------------|------------------------|----------------------|
+| Sim 1      | Not Staggered    | Constant               | No (no cohorts)      |
+| Sim 2      | Not Staggered    | Dynamic                | No (no cohorts)      |
+| Sim 3      | Staggered        | Constant               | No                   |
+| Sim 4      | Staggered        | Constant               | Yes                  |
+| Sim 5      | Staggered        | Dynamic                | No                   |
+| Sim 6      | Staggered        | Dynamic                | Yes                  |
+
+
+
+# Data Generating Process: R code
+
+I attempted to generate data as described in Equation (5) ~ (10). 
+
+## Simulation 1 (Not Staggered)
+```{r}
+#| label: dgp-sim1-2
+n_firms <- 1000
+n_years <- 36
+years <- 1980:2015
+sigma_roa <- 0.309 # The empirical SD of ROA?
+
+
+# /*===== Generating Base Data =====*/
+gen_base_dt <- function(){
+  dt <- 
+    CJ(firm = 1:n_firms, year = years) %>%
+    .[, time_fe := rnorm(1, mean = 0, sd = .025), by = "year"] %>%
+    .[, unit_fe := rnorm(1, mean = 0, sd = .5), by = "firm"] %>%
+    .[, error := rnorm(.N, 0, sigma_roa)] %>%
+    .[, state := sample(1:50, 1), by = "firm"]
+}
+
+# /*===========================================*/
+#'=  Simulation 1 and 2 =
+# /*===========================================*/
+# Treatment starts in 1998
+simulation1_2 <- function(base_dt) {
+  # base_dt <- gen_base_dt() # Comment this out
+
+  # treatment assignment
+  treated_states <- sample(1:50, size = 25)
+
+  base_dt[, `:=`(
+    treat = as.integer(state %in% treated_states), # Treatment indicator: I[Treat]
+    post_treat = as.numeric(year >= 1998) # Post treatment indicator: I[t >= 1998]
+  )] %>%
+  .[, G := ifelse(treat == 1, 1998, 0)] %>% # Cohort indicator (for att_gt())
+  .[, event_time := year - 1998] # time since treatment
+
+  # === Simulation 1: not staggered + constant te === #
+  sim1_dt <- 
+    copy(base_dt) %>%
+    .[, te := 0.5 * sigma_roa * treat * post_treat] %>%
+    .[, y := te + unit_fe + time_fe + error]
+
+  # === Simulation 2: not staggered + dynamic te === #
+  sim2_dt <- 
+    copy(base_dt) %>%
+    .[,te := 0.05 * sigma_roa * treat * post_treat * (year - 1997)] %>%
+    .[, y := te + unit_fe + time_fe + error]
+
+  res_dt <- 
+    rbind(
+      "sim1" = sim1_dt,
+      "sim2" = sim2_dt,
+      idcol ="sim_type"
+    ) %>%
+    .[, .(sim_type, state, firm, year, event_time, treat, G, te, y)]
+  
+  return(res_dt)
+}
+```
+
+## simulation 3 ~ 4 (Staggerd Treatment)
+
+```{r}
+#| label: simulation3_6
+
+# /*===========================================*/
+#'=  Simulation 3, 4, 5, 6 =
+# /*===========================================*/
+simulation3_6 <- function(base_dt) {
+  # base_dt <- gen_base_dt() # Comment this out
+
+  # Assign each state randomly to a treatment cohort
+  cohort_years <- c(1989, 1998, 2007)
+  state_to_cohort <- 
+    data.table(
+      state = 1:50,
+      G = sample(cohort_years, 50, replace = TRUE, prob = c(0.3, 0.4, 0.3))
+    )
+  
+  # Merge cohort assignment to firms
+  base_dt <- merge(base_dt, state_to_cohort, by = "state", all.x = TRUE)
+  # base_dt[, .N, by = "cohort"]
+  
+  base_dt[, `:=` (
+    post_treat = as.integer(year >= G), # Post treatment indicator (I[t >= G])
+    event_time = year - G # Event time (time since treatment)
+  )]
+  # Note that the year in which the treatment initiated is counted as 1
+    
+  # Create cohort dummies: G_t
+  base_dt <- fastDummies::dummy_cols(base_dt, select_columns = "G")
+
+  #/*--------------------------------*/
+  #' ## Simulation 3: Staggered + Constant/Equal
+  #/*--------------------------------*/
+  # homogeneous treatment effect: 0.5 * sigma_roa after treatment
+  sim3_dt <- 
+    copy(base_dt) %>%
+    .[, te := 
+        0.5 * sigma_roa * (
+          G_1989 * post_treat +
+          G_1998 * post_treat +
+          G_2007 * post_treat
+        )
+    ] %>%
+    .[, y := te + unit_fe + time_fe + error]
+  
+  #/*--------------------------------*/
+  #' ## Simulation 4: Staggered + Constant/Unequal
+  #/*--------------------------------*/
+  sim4_dt <- 
+    copy(base_dt) %>%
+    .[, te := 
+        sigma_roa * (
+          0.5 * G_1989 * post_treat +
+          0.3 * G_1998 * post_treat +
+          0.1 * G_2007 * post_treat
+        )
+    ] %>%
+    .[, y := te + unit_fe + time_fe + error]
+  
+  #/*--------------------------------*/
+  #' ## Simulation 5: Staggered + Dynamic/Equal
+  #/*--------------------------------*/
+  sim5_dt <- 
+    copy(base_dt) %>%
+    .[, te := 
+        sigma_roa * (
+          0.03 * G_1989 * post_treat +
+          0.03 * G_1998 * post_treat +
+          0.03 * G_2007 * post_treat
+        ) * (year - G + 1)
+    ] %>%
+    .[, y := te + unit_fe + time_fe + error]
+
+  #/*--------------------------------*/
+  #' ## Simulation 6: Staggered + Dynamic/Unequal
+  #/*--------------------------------*/
+  sim6_dt <- 
+     copy(base_dt) %>%
+     .[, te := 
+         sigma_roa * (
+          0.05 * G_1989 * post_treat +
+          0.03 * G_1998 * post_treat +
+          0.01 * G_2007 * post_treat
+        ) * (year - G + 1)
+      ] %>%
+      .[, y := te + unit_fe + time_fe + error]
+  
+  res_dt <- 
+    rbind(
+      "sim3" = sim3_dt,
+      "sim4" = sim4_dt,
+      "sim5" = sim5_dt,
+      "sim6" = sim6_dt,
+      idcol = "sim_type"
+    ) %>%
+    .[, .(sim_type, state, firm, year, event_time, G, te, y)]
+
+
+  return(res_dt)
+}
+```
+
+
+## Mean outcome path for each simulation
+
+```{r}
+#| label: fig-outcome-paths
+#| fig-cap: "Trends in outcom path"
+#| fig-height: 12
+
+#/*--------------------------------*/
+#' ## Vis: Outcome path
+#/*--------------------------------*/
+set.seed(3485)
+base_data <- gen_base_dt()
+
+sim_dt_comp <- rbind(
+  simulation1_2(base_dt = copy(base_data)),
+  simulation3_6(base_dt = copy(base_data)),
+  fill = TRUE, use.names = TRUE
+)
+
+avg_y_path <- 
+  sim_dt_comp[,.(
+    y = mean(y)
+  ), by = .(year, treat, G, sim_type)]
+
+# /*===== For simulatino 1 and 2 =====*/
+fig_y_sim1_2 <- 
+  ggplot(avg_y_path[sim_type %in% c("sim1", "sim2")]) +
+  geom_line(
+    aes(
+      x = year, y = y,
+      color = factor(treat), group = factor(treat)
+      ),
+    linewidth  = 2
+  ) +
+  geom_vline(xintercept = 1998, linetype = "dashed", linewidth = 1) +
+  facet_wrap(
+    vars(sim_type),
+    labeller = as_labeller(
+      c(sim1 = "Simulation 1\nNot staggered + Constant",
+        sim2 = "Simulation 2\nNot staggered + Dynamic")
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_blank()
+  )
+
+
+# /*===== For simulation 3 - 6 =====*/
+fig_y_sim3_6 <- 
+  ggplot(avg_y_path[sim_type %in% paste0("sim", 3:6)]) +
+  geom_line(
+    aes(
+      x = year, y = y,
+      color = factor(G), group = factor(G)
+      ),
+      linewidth = 2
+  ) +
+  geom_vline(
+    aes(xintercept = G, color = factor(G)),
+    linetype = "dashed", linewidth = 1,
+    show.legend = FALSE
+  ) +
+  facet_wrap(
+    vars(sim_type), ncol = 2,
+    labeller = as_labeller(
+      c(sim3 = "Simulation 3\nStaggered + Constant/Equal",
+        sim4 = "Simulation 4\nStaggered + Constant/Unequal",
+        sim5 = "Simulation 5\nStaggered + Dynamic/Equal",
+        sim6 = "Simulation 6\nStaggered + Dynamic/Unequal")
+    )
+  ) +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_blank()
+  )
+
+# /*===== figure =====*/
+fig_y_sim1_2 / fig_y_sim3_6 +
+  plot_layout(heights = c(2, 4)) & ylim(-0.1, 0.45)
+```
+
+
+# Simulation: CS-DID vs Extended TWFE
+
+## Functions to run CS-DID and Extended TWFE
++ Control group is "not-yet-treated" group
++ From the year 2007, all states are treated. Thus, treatment effects for the last cohorts are not identified. For cohort 1989 and 1998, treatment effects are identified until 2006.
+
+```{r}
+#| Define: define-cs-etwfe-functions
+
+# set.seed(1125)
+# base_dt <- gen_base_dt()
+
+
+# /*===========================================*/
+#'=  CS-DID =
+# /*===========================================*/
+run_cs <- function(reg_dt){
+  #/*--------------------------------*/
+  #' ## Test Run
+  # set.seed(1234)
+  # test_case_dt <- simulation3_6(base_dt)
+  # reg_dt <- test_case_dt[sim_type == "sim3"]
+  #/*--------------------------------*/
+  cs_att_gt <- 
+    att_gt(
+      yname = "y",
+      gname = "G",
+      idname = "firm",
+      tname = "year",
+      data = reg_dt,
+      xformla = ~1,
+      control_group = "notyettreated",
+      est_method = "dr"
+    )
+  
+  # === ATT(g,t) === #
+  cs_att_gt_out <- 
+    tidy(cs_att_gt) %>%
+    data.table() %>%
+    .[, .(G = group, year = time, estimate)]
+  
+  # === Mean Post-treatment effects (5 years) === #
+  # Extract 5 years post-treatment
+  # cs_static_att <- mean(cs_att_gt_out[year >= G  & year <= G + 4, estimate])
+
+  # === ATT(g) === #
+
+
+  # === ATT(e) === #
+
+  
+  
+  # === Outputs === #
+  return(
+    tibble(
+      method = "cs",
+      att_gt = list(cs_att_gt_out)
+      # static_att = cs_static_att
+    )
+  )
+}
+
+
+# /*===========================================*/
+#'=  Extended TWFE =
+# /*===========================================*/
+run_extwfe <- function(reg_dt){
+  #/*--------------------------------*/
+  #' ## Test Run
+  # set.seed(1234)
+  # test_case_dt <- simulation3_6(base_dt)
+  # reg_dt <- test_case_dt[sim_type == "sim3"]
+  #/*--------------------------------*/
+  etwfe_att_gt <- 
+    etwfe(
+      fml = y ~ 1,
+      tvar = year,
+      gvar = G,
+      data = reg_dt,
+      cgroup = "notyet"
+    )
+
+  # which is equivalent to:
+  # extwfe_att_gt <- 
+  #   feols(
+  #     y ~ post_treat : factor(event_time) : factor(G) | firm + year,
+  #     data = reg_dt,
+  #     notes = FALSE # Suppress the message
+  #   )
+  
+  # extwfe_att_gt_out <- 
+  #   tidy(etwfe_att_gt) %>%
+  #   as.data.table() %>%
+  #   .[, G := as.numeric(gsub(".*G.", "", term))] %>%
+  #   .[, year := as.numeric(gsub(".*event_time.(\\d+).*", "\\1", term)) + G] %>%
+  #   .[,.(G, year, estimate)] %>%
+  #   .[year < 2007,]
+  
+  # === ATT(g,t) === #
+  etwfe_att_gt_out <- 
+    tidy(etwfe_att_gt) %>%
+    data.table() %>%
+    .[, G := as.numeric(gsub(".*G::(\\d+):.*", "\\1", term))] %>%
+    .[, year := as.numeric(gsub(".*year::(\\d+)", "\\1", term))] %>%
+    .[, .(G, year, estimate)]
+  
+  # === Mean Post-treatment effects (5 years) === #
+  # Extract 5 years post-treatment
+  # etwfe_static_att <- mean(etwfe_att_gt_out[year >= G  & year <= G + 4, estimate])
+
+  # === ATT(g) === #
+
+
+  # === ATT(e) === #
+
+
+
+  # === Outputs === #
+  return(
+    tibble(
+      method = "etwfe",
+      att_gt = list(etwfe_att_gt_out)
+      # static_att = etwfe_static_att
+    )
+  )
+}
+```
+
+```{r}
+# label: define-run-sim-comp
+
+run_sim_comp <- function(){
+
+  base_dt <- gen_base_dt()
+
+  ls_sim_dt_comp <- 
+    rbindlist(
+      list(
+        simulation1_2(base_dt = copy(base_dt)),
+        simulation3_6(base_dt = copy(base_dt))
+      ),
+      use.names = TRUE,
+      fill = TRUE
+    ) %>%
+    split(., by = "sim_type")
+
+  true_att_gt <- 
+    lapply(
+      ls_sim_dt_comp,
+      \(x) x[, .(att_gt = mean(te)), by = .(G, year)]
+    )
+
+  case_dt <- 
+    tibble(
+      case = names(ls_sim_dt_comp),
+      reg_dt = ls_sim_dt_comp,
+      true_att = true_att_gt
+    )
+
+  case_dt <- 
+    case_dt %>%
+    mutate(
+      res_cs = lapply(
+        1:nrow(.),
+        \(i) run_cs(reg_dt = .$reg_dt[[i]])
+      ),
+      res_etwfe = lapply(
+        1:nrow(.),
+        \(i) run_extwfe(reg_dt = .$reg_dt[[i]])
+      )
+    ) %>%
+    select(!reg_dt)
+}
+
+# test <- 
+#   lapply(1:2, \(x) run_sim_comp()) %>%
+#   rbindlist(idcol = "sim")
+
+# test_case6 <- filter(test, case == "sim6")
+
+# test_case6$true_att[[1]]
+# test_case6$true_att[[2]]
+```
+
+
+## Run 500 times simulation
+
+```{r}
+#| label: run-simulation
+#| results: "hide"
+# xs <- 1:500
+
+# with_progress({
+#   p <- progressor(along = xs)
+
+#   res_sim_comp <- 
+#     future_lapply(
+#       xs,
+#       \(x){
+#         p()
+#         run_sim_comp()
+#       },
+#       future.seed = NULL
+#     ) %>%
+#     rbindlist(idcol = "sim")
+# })
+
+# saveRDS(
+#   res_sim_comp,
+#   here("Data/Processed/sim_baker2022.rds")
+# )
+
+res_sim_comp <- readRDS(here("Data/Processed/sim_baker2022.rds"))
+
+#/*--------------------------------*/
+#' ## Results
+#/*--------------------------------*/
+res_true_att_gt <- 
+  res_sim_comp %>%
+  select(sim, case, true_att) %>%
+  unnest("true_att") %>%
+  data.table()
+  # .[, `:=`(
+  #   case_label = paste0("Simulation ", sim),
+  #   gt_label = paste0("G = ", G, " Year = ", year)
+  # )]
+
+
+res_cs_att_gt <- 
+  res_sim_comp %>%
+  select(sim, case, res_cs) %>%
+  unnest("res_cs") %>%
+  unnest("att_gt") %>%
+  data.table()
+  # .[, `:=`(
+  #   case_label = paste0("Simulation ", sim),
+  #   gt_label = paste0("G = ", G, " Year = ", year)
+  # )]
+
+
+
+res_etwfe_att_gt <- 
+  res_sim_comp %>%
+  select(sim, case, res_etwfe) %>%
+  unnest("res_etwfe") %>%
+  unnest("att_gt") %>%
+  data.table()
+  # .[, `:=`(
+  #   case_label = paste0("Simulation ", sim),
+  #   gt_label = paste0("G = ", G, " Year = ", year)
+  # )]
+
+
+
+```
+
+
+# Results
+
+## Static Effect Estimates (Figure 6 in @Baker.etal2022)
+
+```{r}
+#| label: fig-static-att
+#| fig-cap: "Distribution of static effect estimates of CS-DID and Extended TWFE"
+#| fig-asp: .7
+#| out-width: 95%
+#| fig-width: 8.142857
+
+
+# === Mean Post-treatment effects (5 years) === #
+# Extract 5 years post-treatment
+true_att_gt_static <- 
+  res_true_att_gt %>%
+  .[G %in% c(1989, 1998),] %>%
+  .[year >= G  & year <= G + 4, ] %>%  
+  .[, .(true_att_static = mean(att_gt)), by = case]
+
+
+cs_att_gt_static <- 
+  res_cs_att_gt %>%
+  .[G %in% c(1989, 1998),] %>%
+  .[year >= G  & year <= G + 4, ] %>%
+  .[, .(static_att = mean(estimate)), by = .(sim, case, method)]
+
+
+etwfe_att_gt_static <- 
+  res_etwfe_att_gt %>%
+  .[G %in% c(1989, 1998),] %>%
+  .[year >= G  & year <= G + 4, ] %>%
+  .[, .(static_att = mean(estimate)), by = .(sim, case, method)]
+
+
+att_gt_static <- rbind(cs_att_gt_static, etwfe_att_gt_static)
+
+#/*--------------------------------*/
+#' ## Vidualization
+#/*--------------------------------*/
+case_labels <- c(
+  sim1 = "Simulation 1\nNot staggered + Constant",
+  sim2 = "Simulation 2\nNot staggered + Dynamic",
+  sim3 = "Simulation 3\nStaggered + Constant/Equal",
+  sim4 = "Simulation 4\nStaggered + Constant/Unequal",
+  sim5 = "Simulation 5\nStaggered + Dynamic/Equal",
+  sim6 = "Simulation 6\nStaggered + Dynamic/Unequal"
+  )
+
+
+
+ggplot() + 
+  geom_histogram(
+    data = att_gt_static[method == "cs"],
+    aes(static_att, fill = "CS"),
+    alpha = 0.7, bins = 50
+  ) +
+  geom_histogram(
+    data = att_gt_static[method == "etwfe"],
+    aes(static_att, fill = "ETWFE"),
+    alpha = 0.7, bins = 50
+  ) +
+  geom_vline(
+    data = true_att_gt_static,
+    aes(xintercept = true_att_static),
+    linetype = "dashed"
+  ) +
+  facet_wrap(
+    vars(case), scale = "free",
+    labeller = as_labeller(case_labels)
+  ) +
+  fig_theme
+ 
+
+
+# This does not work
+# ggplot(att_gt_static) + 
+#   geom_histogram(
+#     aes(static_att, fill = method),
+#     alpha = 0.7, bins = 50
+#   ) +
+#   geom_vline(
+#     data = true_att_gt_static,
+#     aes(xintercept = true_att_static),
+#     linetype = "dashed"
+#   ) +
+#   facet_wrap(
+#     vars(case), scale = "free",
+#     labeller = as_labeller(case_labels)
+#   )
+```
+
+
+::: {.callout-note}
++ Figure 6 in the paper shows the distribution of static treatment effect estimates, defined as **the average treatment effect over the five years following treatment**. For each simulated dataset, a single scalar ATT estimate is computed  based on the ATT(g,t) estimates from CS-DID and ETWFE by aggregating the ATT(g,t) estimates over this five-year post-treatment window. 
++ I guess they wanted to compare to compare these alternative estimators directly to the traditional TWFE DiD estimates shown in Figures 1 and 2.
+:::
+
+
+## ATT(g,t) for simulation 3 ~ 6
+
+```{r}
+#| label: fig-est-att-gt-selected-g-t
+#| fig-cap: "Estimated ATT(g,t) for selected (g,t) combinations"
+#| fig-asp: 1.2
+#| out-width: 95%
+#| fig-width: 8.142857
+
+# tg_years <- c(
+#   1993, # 5 years after 1989
+#   2002 # 5 years after 1998
+# )
+
+true_att_gt <- 
+  res_true_att_gt %>%
+  .[case %in% paste0("sim", 3:6)] %>%
+  .[ G == 1989 & year == 1993 | G == 1998 & year == 2002] %>%
+  .[, .(true_att_gt = mean(att_gt)), by = .(case, G, year)] %>%
+  .[, group := paste0("G =  ", G, ", Year = ", year)]
+
+
+# res_cs_att_gt[case %in% paste0("sim", 3:6) & G == 1989 & year == 1993, ]
+# res_cs_att_gt[case %in% paste0("sim", 3:6) & G == 1998 & year == 2002, ]
+
+# res_etwfe_att_gt[case %in% paste0("sim", 3:6) & G == 1989 & year == 1993, ]
+# res_etwfe_att_gt[case %in% paste0("sim", 3:6) & G == 1998 & year == 2002, ]
+
+
+
+est_att_gt <-
+  rbind(res_cs_att_gt, res_etwfe_att_gt) %>%
+  .[case %in% paste0("sim", 3:6)] %>%
+   .[ G == 1989 & year == 1993 | G == 1998 & year == 2002] %>%
+   .[, group := paste0("G =  ", G, ", Year = ", year)]
+
+# unique(est_att_gt[,.(method, G, year)])
+# est_att_gt[,.N, by = .(method, G, year)]
+
+
+# ggplot(est_att_gt[G == 1989 & case == "sim3"]) +
+#    geom_histogram(
+#       aes(estimate, fill = method), bins = 50, alpha = 0.5
+#     )
+
+
+ggplot() + 
+    geom_histogram(
+      # data = est_att_gt[G == 1989 & case == "sim3" & method == "cs"],
+      data = est_att_gt[method == "cs"],
+      aes(estimate, fill = "CS"),
+      alpha = 0.7, bins = 50
+    ) +
+    geom_histogram(
+      # data = est_att_gt[G == 1989 & case == "sim3" & method == "etwfe"],
+      data = est_att_gt[method == "etwfe"],
+      aes(estimate, fill = "ETWFE"),
+      alpha = 0.7, bins = 50
+    ) +
+    geom_vline(
+      data = true_att_gt,
+      aes(xintercept = true_att_gt),
+      linetype = "dashed"
+    ) + 
+    facet_grid(
+      case ~ group,
+      labeller = labeller(case = case_labels)
+    ) +
+    fig_theme
+```
+
+## ATT(g)
+
+
+
+## ATT(e)
+
+
+
+

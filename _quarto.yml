@@ -1,5 +1,9 @@
 project:
+  type: default
   title: "HetStaggeredDID_lab"
+execute:
+  freeze: true
+
 
 
 

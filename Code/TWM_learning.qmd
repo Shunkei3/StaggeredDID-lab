@@ -15,6 +15,8 @@ format:
     toc: true
     toc-depth: 3
     toc-expand: 3
+    fontsize: 15pt
+bibliography: ../writing/1_StaggeredDID.bib
 embed-resources: true
 # crossref:
 #   fig-title: Fig     # (default is "Figure")
@@ -29,11 +31,6 @@ execute:
   fig-align: "center"
 engine: knitr
 ---
-
-::: {.callout-caution}
-## TO DO:
-
-:::
 
 
 ```{r}
@@ -73,23 +70,51 @@ standardize_term <- function(term) {
 }
 ```
 
-
-+ **Theorem 3.1**: the Two-Way Fixed Effects (TWFE) estimator is algebraically identical to a Pooled Ordinary Least Squares (POLS) estimator that includes not only the covariates ($\mathbf{x_{it}}$) but also the unit-specific averages over time $\mathbf{\bar{x}_{i \cdot}}$) and cross-sectional averages for each time $\mathbf{\bar{x}_{\cdot t}}$.
-  + "*$\mathbf{\bar{x}_{i \cdot}}$ and $\mathbf{\bar{x}_{\cdot t}}$ effectively act as sufficient statistics in accounting for any unit-specific heterogeneity and time-specific heterogeneity that is correalted with $\mathbf{x_{it}}$. Rather than having to include (N_1) + (T-1) control variables, it suffices to include 2K control variables $(\mathbf{\bar{x}_{i \cdot}}, \mathbf{\bar{x}_{\cdot t}})$*"
+# Overview of @Wooldridge2021
 
 
-+ **Corollary 3.3**: Including additional variables that change only across $i$ or only acorss $t$ will not change the estimates.
+## The Equivalence between TWFE and TWM (POLS)
+
+**Theorem 3.1**: **the TWFE estimator is algebraically identical to a POLS estimator that includes not only the covariates ($\mathbf{x_{it}}$) but also [the unit-specific averages over time ($\mathbf{\bar{x}_{i \cdot}}$)]{style="color:red;"} and [cross-sectional averages for each time $\mathbf{\bar{x}_{\cdot t}}$]{style="color:red;"}.**
+
+@Wooldridge2021 call the POLS with additional covariates $\mathbf{\bar{x}_{i \cdot}}$ and $\mathbf{\bar{x}_{\cdot t}}$ as the **Two-way Mundlak Regression (TWM)**.
 
 
-+ Extended TWFE: Allow more heterogeneity than the usual TWFE model
-+ Two-way Mundlak Regression (TWM): Pooled OLS where time average and cross-sectional average of covariates are included additionally. 
+**Unit-specific time series averages:**
+$$
+\overline{\mathbf{x}}_{i .}=T^{-1} \sum_{t=1}^T \mathbf{x}_{i t}
+$$
 
-<br>
+**Period-specific cross-sectional averages**
+$$
+\overline{\mathbf{x}}_{\cdot t}=N^{-1} \sum_{i=1}^N \mathbf{x}_{i t}
+$$
+
+> "*Theorem 3.1 is purely algebraic, **it shows that $\mathbf{\bar{x}_{i \cdot}}$ and $\mathbf{\bar{x}_{\cdot t}}$ effectively act as sufficient statistics in accounting for any unit-specific heterogeneity and time-specific heterogeneity** that is correalted with $\mathbf{x_{it}}$. Rather than having to include (N_1) + (T-1) control variables, it suffices to include 2K control variables $(\mathbf{\bar{x}_{i \cdot}}, \mathbf{\bar{x}_{\cdot t}})$*"
+
+So, according to Theorem 3.1, the following two models are algebraically equivalent:
+
+(1) TWFE model:
+$$
+y_{it} \text{ on } \mathbf{x}_{it}, \, c_i, \, f_t, \quad t = 1, \ldots, T, \quad i = 1, \ldots, N
+$$
+
+(2) TWM model:
+
+$$
+y_{it} \text{ on }1, \, \mathbf{x}_{it}, \, \mathbf{\bar{x}_{i \cdot}}, \, \mathbf{\bar{x}_{\cdot t}},  \quad t = 1, \ldots, T, \quad i = 1, \ldots, N
+$$
 
 ::: {.callout-note}
-## Questions
-+ Any efficiency gain from MTW (or extended TWFE) over CS?
-  + The paper says that "*In cases where a never treated group exists, Callaway and Sant’Anna (2021) separate the NT group from other potential controls and therefore does not use all of the information availabe in the identifying assumptions. ...*" (See page 54)
+## Corollary 3.3
+**Including additional variables that change only across $i$ or only acorss $t$ will not change the estimates.**
+:::
+
++ This is intuitively clear because [the unit-specific averages over time ($\mathbf{\bar{x}_{i \cdot}}$)]{style="color:red;"} and [cross-sectional averages for each time $\mathbf{\bar{x}_{\cdot t}}$]{style="color:red;"} already account for any unit-specific heterogeneity and time-specific heterogeneity.
+
+
+::: {.callout-important}
+Using Theorem 3.1, we rewrite the any TWFE model as a TWM model 
 :::
 
 
@@ -144,6 +169,134 @@ res_reg <-
 
 res_reg
 ```
+
+
+As expected, the naive POLS gives biased estimates of $\beta_1$ and $\beta_2$. The TWFE and TWM give the same estimates of $\beta_1$ and $\beta_2$.
+
+<br>
+
+# Application to Interventions with Common Treatment Timing
+
+## Heterogeneous Time Effects
+The equivalence between TWFE and DID is well know for the case of a single treatment timing. We can show this by writing the TWFE model as a TWM model based on Theorem 3.1.
+
+
+Suppose that 
+
++ $\textcolor{blue}{w_it = d_i \cdot p_t}$: a treatment indicator for individual $i$ at time $t$.
+  + $d_i$: a dummy indicating whether individual $i$ is eventually treated or not.
+  + $p_t$: a dummy indicating the post-treatment period.
+    + $p_t = fq_t + \cdots + fT_t$, where $fq_t$ is a dummy variable equal to 1 if $s = t$ and 0 otherwise.
+
+A TWFE model to estimate the treatment effect of $w_{it}$ is 
+
+$$
+y_{it} = \beta w_{it} + c_i + g_t + u_{it}
+$$ {#eq-simple-twfe-did}
+
+To write @eq-simple-twfe-did as a TWM model, we need to add (i) time average of $w_{it}$, $\textcolor{red}{w_{i \cdot}}$, and (ii) cross-sectional average of $w_{\cdot}$, $\textcolor{red}{w_{\cdot t}}$, instead of unit and time fixed effects $c_i$ and $g_t$.
+
+$$
+\begin{aligned}
+\color{red}{w_{i \cdot}} &= d_i \cdot \bar{p}  \\
+\color{red}{w_{\cdot t}} &= \bar{d} \cdot p_t
+\end{aligned}
+$$
+
+So, the TWM model that is equivalent to @eq-simple-twfe-did is
+
+$$
+\begin{aligned}
+y_{it} 
+  &= \alpha + \beta w_{it} + \gamma^{*} \textcolor{red}{w_{i \cdot}} + \delta^{*} \textcolor{red}{w_{\cdot t}} + e_{it} \\
+  &= \alpha + \beta w_{it} + \gamma^{*} \textcolor{red}{d_i \cdot \bar{p}} + \delta^{*} \textcolor{red}{\bar{d} \cdot p_t} + e_{it} \\ 
+  &= \alpha + \beta w_{it} + \gamma \textcolor{red}{d_i} + \delta \textcolor{red}{p_t} + e_{it}
+\end{aligned}
+$$ {#eq-simple-twm-did}
+
+, which is also equivalent to the conventional DiD model.
+
+
+::: {.callout-important}
+I found that this is the most understandable way to show the equivalence between TWFE and DiD in the case of a single treatment timing.
+:::
+
+By interacting $w_{it}$ with $\mathbf{x}_i$, we can allow the treatment effect to change with the covariates $\mathbf{x}_i$.
+
+$$
+y_{i t} = 
+  \alpha+\beta w_{i t} + \textcolor{blue}{\left[w_{i t} \cdot \left(\mathbf{x}_i-\mu_1\right)\right]} \gamma+\mathbf{x}_i \xi+\zeta d_i+\left(d_i \cdot \mathbf{x}_i\right) \lambda+\theta p_t+\left(p_t \cdot \mathbf{x}_i\right) \delta+e_{i t}
+$$ {#eq-twm-common-hete-with-x}
+
+**NOTE:** 
+
++ By centering $\mathbf{x}_i$ about $\mu_1$ ($\mu_1 = E[\mathbf{x}_i|d_i = 1]$), we can interpret $\mathbf{\gamma}$ as the ATT. 
++ For the terms not involving $w_{it}$, there is no need to center $\mathbf{x}_i$ because doing so does not change estimation of $\beta$ and $\gamma$.
+
+## Heterogeneous Time Effects
+
+For example, consider the following model,
+
+$$
+y_{i t}=\beta_q\left(w_{i t} \cdot f q_t\right)+\cdots+\beta_T\left(w_{i t} \cdot f T_t\right)+c_i+g_t+u_{i t}
+$$ {#eq-twfe-common-hete-time}
+
++ $fr_t$: time period dummies
++ $w_{it}$: treatment indicator for individual $i$ at time $t$. (i.e., $w_{it} = d_i \cdot p_t$)
+  + $d_i$ : treatment indicator (eventually treated or never treated)
+  + $p_t$: a dummy indicating the post-treatment period
+
+@eq-twfe-common-hete-time allows the policy effect to be different in each of the treated period. This felxible version of TWFE is called **Extented TWFE (ETWFE)**.
+
+Again, the equivalent TWM model can be derived using Theorem 3.1. We need to add (i) time average of $w_{it} \cdot fr_t$, and (ii) cross-sectional average of $w_{\cdot t} \cdot fr_t$ for all $r = q, \ldots, T$.
+
+This gives us the following TWM model:
+
+$$
+\begin{aligned}
+y_{i t} & =\alpha+\beta_q\left(d_i \cdot f q_t\right)+\cdots+\beta_T\left(d_i \cdot f T_t\right)+\zeta d_i+\theta_q f q_t+\cdots+\theta_I f T_t+e_{i t} \\
+& =\alpha+\beta_q\left(w_{i t} \cdot f q_t\right)+\cdots+\beta_T\left(w_{i t} \cdot f T_t\right)+\zeta d_i+\theta_q f q_t+\cdots+\theta_I f T_t+e_{i t}
+\end{aligned}
+$$ {#eq-twm-common-hete-time}
+
+
+**With ETWFE model, we can allow the treatment effect to vary by $\mathbf{x}_t$**. 
+
+$$
+\begin{aligned}
+y_{i t}= 
+  & \beta_q\left(w_{i t} \cdot f q_t\right)+ \cdots + \beta_T\left(w_{i t} \cdot f T_t\right) \\
+  & +\left[w_{i t} \cdot f q_t \cdot\left(\mathbf{x}_i-\mu_1\right)\right] \gamma_q+\cdots+\left[w_{i t} \cdot f T_t \cdot\left(\mathbf{x}_i-\mu_1\right)\right] \gamma_T \\
+  & +\left(f q_t \cdot \mathbf{x}_i\right) \delta_q+\cdots+\left(f T_t \cdot \mathbf{x}_i\right) \delta_T \\
+  & + c_i + g_t + u_{i t}
+\end{aligned}
+$$
+
+::: {.callout-important}
+@Wooldridge2021 (P23) says that 
+
+> Compared with the usual TWFE estimator, which replaces all terms in (5.15) with the single variable $w_{i t}$, the extended version allows much more flexibility. This highlights the important point that there is nothing inherently wrong with TWFE, which is an estimation method. The problem with how TWFE is implemented in DiD settings is that it is applied to a restrictive model.
+:::
+
+
+# Staggered Interventions
+
+
+
+
+
+
+
+<br>
+
+::: {.callout-note}
+## Questions
++ Any efficiency gain from MTW (or extended TWFE) over CS?
+  + The paper says that "*In cases where a never treated group exists, Callaway and Sant’Anna (2021) separate the NT group from other potential controls and therefore does not use all of the information availabe in the identifying assumptions. ...*" (See page 54)
+:::
+
+
+
 
 
 ## Simulation 1: Extended TWFE and CS
@@ -414,7 +567,7 @@ true_att <- ls_dt$true_att
 
 ```
 
-## Without Controls
+### Without Controls
 Following models are equivalent:
 TWM model (1.1) - Full time period dummies
 $$
@@ -560,7 +713,16 @@ reg_res1 <- run_reg_no_controls(dt)
 reg_res1
 ```
 
-## With Controls
+::: {.callout-important}
++ The ETFE and CS-DID give the same estimtes for the treatment effects (ATT(g,t)), on average. (If we run the simulation many times)
++ [The notalble difference is in the standard errors. The ETWFE is more efficient than the CS-DID.]{"style="color: blue;"}
+:::
+
+::: {.callout-caution}
+Note that coefficient estimates between ETWFE (TWM) and CS-DID are not exactly the same. This is because I simply run regressions one time. If we run the simulation many times, the average estimates will be the same. 
+:::
+
+### With Controls
 
 + As a result of theorem 3.2, additing time-constant controls $x_i$, and also interacting them with the cohort dummies $d_{ir}$ does not change the treatment effect estimates. 
 > "However, having access to covariates allows us to relax the common trends assumption even in the staggered case."
@@ -731,7 +893,7 @@ true_att
 reg_res2
 ```
 
-## Monte Carlo Simulations
+## Wooldridge's Simulations: Run 1000 times
 ```{r}
 #| label: sim-wooldridge-sim6
 #| output: false
@@ -800,6 +962,7 @@ flextable(tb_res_sim6_no_controls)
 #| label: sim-wooldridge-sim6-with-controls
 flextable(tb_res_sim6_controls)
 ```
+
 
 # Outdated
 ## The Baker simulation
