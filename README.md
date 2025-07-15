@@ -3,9 +3,12 @@
 Code repository for exploring and learning staggered DID methods.
 
 
-+ Extended TWFE: see `Code/TWM_learning.qmd`
-+ CS-DID: see `Code/Sim_CS_DID.qmd`
-+ *Replication for Baker et al. (2022)'s simulation*: see `Code/Sim_Baker_et_al_2022.qmd`
++ Extended TWFE: ([html](https://shunkei3.github.io/StaggeredDID-lab/Code/TWM_learning.html))
+  + see `Code/TWM_learning.qmd`
++ CS-DID ([html](https://shunkei3.github.io/StaggeredDID-lab/Code/Sim_CS_DID.html)): 
+  + see `Code/Sim_CS_DID.qmd`
++ *Replication for Baker et al. (2022)'s simulation* ([html](https://shunkei3.github.io/StaggeredDID-lab//Code/Sim_Baker_et_al_2022.html)): 
+  + See `Code/Sim_Baker_et_al_2022.qmd`
   + Using their simulation framework, I compare the performance of the CS-DID and the extended TWFE.
 
 
