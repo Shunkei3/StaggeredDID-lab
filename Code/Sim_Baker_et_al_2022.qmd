@@ -1,6 +1,6 @@
 ---
-title: "Baker et al. (2022)'s Simulation"
-author: shunkei kakimoto
+title: "Baker et al. (2022)'s Simulation: CS-DID vs Extended TWFE"
+author: Shunkei Kakimoto
 format:
   html:
     page-layout: full
@@ -732,7 +732,12 @@ ggplot() +
 true_att_gt <- 
   res_true_att_gt %>%
   .[case %in% paste0("sim", 3:6)] %>%
-  .[ G == 1989 & year == 1993 | G == 1998 & year == 2002] %>%
+  .[ 
+    G == 1989 & year == 1991 |
+    G == 1989 & year == 1993|
+    G == 1998 & year == 2000 |
+    G == 1998 & year == 2002
+  ] %>%
   .[, .(true_att_gt = mean(att_gt)), by = .(case, G, year)] %>%
   .[, group := paste0("G =  ", G, ", Year = ", year)]
 
@@ -748,8 +753,13 @@ true_att_gt <-
 est_att_gt <-
   rbind(res_cs_att_gt, res_etwfe_att_gt) %>%
   .[case %in% paste0("sim", 3:6)] %>%
-   .[ G == 1989 & year == 1993 | G == 1998 & year == 2002] %>%
-   .[, group := paste0("G =  ", G, ", Year = ", year)]
+  .[ 
+    G == 1989 & year == 1991 |
+    G == 1989 & year == 1993|
+    G == 1998 & year == 2000 |
+    G == 1998 & year == 2002
+  ] %>%
+  .[, group := paste0("G =  ", G, ", Year = ", year)]
 
 # unique(est_att_gt[,.(method, G, year)])
 # est_att_gt[,.N, by = .(method, G, year)]
@@ -795,3 +805,4 @@ ggplot() +
 
 
 
+# References
