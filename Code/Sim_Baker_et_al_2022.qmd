@@ -308,7 +308,7 @@ fig_y_sim1_2 <-
       x = year, y = y,
       color = factor(treat), group = factor(treat)
       ),
-    linewidth  = 2
+    linewidth  = 1.5
   ) +
   geom_vline(xintercept = 1998, linetype = "dashed", linewidth = 1) +
   facet_wrap(
@@ -332,7 +332,7 @@ fig_y_sim3_6 <-
       x = year, y = y,
       color = factor(G), group = factor(G)
       ),
-      linewidth = 2
+      linewidth = 1.5
   ) +
   geom_vline(
     aes(xintercept = G, color = factor(G)),
